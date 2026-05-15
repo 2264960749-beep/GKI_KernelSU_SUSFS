@@ -23,14 +23,14 @@ jobs:
       - name: 下载交叉编译工具链
         run: |
           git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git -b lineage-19.1 gcc
-          git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git -b lineage-19.1 gcc_arm
 
-      - name: 拉取小米平板6 Max 14 设备树与驱动模块
+      - name: 拉取小米平板6 Max 14 驱动模块（修复分支问题）
         run: |
           git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git vendor-kernel
           cd vendor-kernel
-          git checkout yudi-os2.0
-          cp -r arch/arm64/boot/dts/qcom/* ../kernel/arch/arm64/boot/dts/qcom/
+          # 改为使用存在的 yudi 分支
+          git checkout yudi
+          # 直接复制驱动模块到内核目录
           cp -r drivers/* ../kernel/drivers/
           cd ..
 
@@ -38,7 +38,6 @@ jobs:
         run: |
           cd kernel
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.6
-          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SUSFS/main/kernel/setup.sh" | bash
           cd ..
 
       - name: 配置 GKI 内核（适配 yudi 设备）
