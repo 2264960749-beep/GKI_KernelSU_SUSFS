@@ -1,12 +1,11 @@
-name: 编译内核a12-5-10
+name: 编译内核a12-5-10（小米平板6 Max 14专用）
 permissions:
-  contents: write  # Allows writing to repository contents (for pushing tags)
-  actions: write    # Allows triggering actions
+  contents: write
+  actions: write
 on:
   workflow_dispatch:
     inputs:
       kernelsu_variant:
-        # description: "选择 KernelSU | 注意:选中MKSU时为标准版"
         description: "选择 KernelSU"
         required: true
         type: choice
@@ -16,22 +15,54 @@ on:
           - MKSU
           - SukiSU
         default: SukiSU
-      kernelsu_branch:
-        description: "选择 ksu 分支"
-        required: true
-        type: string
-        default: main
 jobs:
-  build-kernel-a12-5-10:
-    uses: ./.github/workflows/kernel-a12-5-10.yml
-    secrets: inherit
-    with:
-      kernelsu_variant: ${{ inputs.kernelsu_variant }}
-      kernelsu_branch: ${{ inputs.kernelsu_branch }}
-      kernel_source: https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git
-      kernel_branch: yudi-os2.0
-      defconfig: yudi_defconfig
-      arch: arm64
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt update
+          sudo apt install -y git build-essential libssl-dev libelf-dev bc bison flex python3 zip wget
+
+      - name: 拉取内核源码（小米平板6 Max 14 yudi）
+        run: |
+          git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
+          cd kernel
+          git checkout yudi-os2.0
+          cd ..
+
+      - name: 下载交叉编译工具链
+        run: |
+          git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git -b lineage-19.1 gcc
+
+      - name: 应用 KernelSU + SUSFS 补丁
+        run: |
+          cd kernel
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
+          cd ..
+
+      - name: 配置并编译内核
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE=../gcc/bin/aarch64-linux-android-
+          make yudi_defconfig
+          make -j$(nproc)
+          cd ..
+
+      - name: 打包内核
+        run: |
+          cp kernel/arch/arm64/boot/Image.gz boot.img
+          zip kernel-yudi.zip boot.img
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-yudi
+          path: kernel-yudi.zip
 
   # build-kernel-a13-5-10:
   #   uses: ./.github/workflows/kernel-a13-5.10.yml
