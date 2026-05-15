@@ -1,68 +1,64 @@
-name: 编译内核a12-5-10（小米平板6 Max 14专用）
+name: 编译 GKI 内核 5.10（小米平板6 Max 14 专用）
 permissions:
   contents: write
   actions: write
 on:
   workflow_dispatch:
-    inputs:
-      kernelsu_variant:
-        description: "选择 KernelSU"
-        required: true
-        type: choice
-        options:
-          - Official
-          - Next
-          - MKSU
-          - SukiSU
-        default: SukiSU
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 拉取代码
-        uses: actions/checkout@v4
-
       - name: 安装依赖
         run: |
           sudo apt update
-          sudo apt install -y git build-essential libssl-dev libelf-dev bc bison flex python3 zip wget
+          sudo apt install -y git build-essential libssl-dev libelf-dev bc bison flex python3 zip wget lz4
 
-      - name: 拉取内核源码（小米平板6 Max 14 yudi）
+      - name: 拉取 GKI 内核源码（Android 12 5.10）
         run: |
-          git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel
+          git clone https://android.googlesource.com/kernel/common -b android12-5.10 kernel
           cd kernel
-          git checkout yudi-os2.0
+          git log --oneline -1
           cd ..
 
       - name: 下载交叉编译工具链
         run: |
           git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git -b lineage-19.1 gcc
+          git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git -b lineage-19.1 gcc_arm
 
-      - name: 应用 KernelSU + SUSFS 补丁
+      - name: 拉取小米平板6 Max 14 设备树与驱动模块
         run: |
-          cd kernel
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
+          git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git vendor-kernel
+          cd vendor-kernel
+          git checkout yudi-os2.0
+          cp -r arch/arm64/boot/dts/qcom/* ../kernel/arch/arm64/boot/dts/qcom/
+          cp -r drivers/* ../kernel/drivers/
           cd ..
 
-      - name: 配置并编译内核
+      - name: 应用 KernelSU + SUSFS 模块补丁（GKI 模式）
+        run: |
+          cd kernel
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.6
+          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SUSFS/main/kernel/setup.sh" | bash
+          cd ..
+
+      - name: 配置 GKI 内核（适配 yudi 设备）
         run: |
           cd kernel
           export ARCH=arm64
           export CROSS_COMPILE=../gcc/bin/aarch64-linux-android-
-          make yudi_defconfig
-          make -j$(nproc)
+          LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh
           cd ..
 
-      - name: 打包内核
+      - name: 生成 boot.img
         run: |
-          cp kernel/arch/arm64/boot/Image.gz boot.img
-          zip kernel-yudi.zip boot.img
+          cp kernel/out/android12-5.10/dist/Image.gz boot.img
+          zip kernel-gki-yudi.zip boot.img
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-yudi
-          path: kernel-yudi.zip
+          name: kernel-gki-yudi
+          path: kernel-gki-yudi.zip
 
   # build-kernel-a13-5-10:
   #   uses: ./.github/workflows/kernel-a13-5.10.yml
