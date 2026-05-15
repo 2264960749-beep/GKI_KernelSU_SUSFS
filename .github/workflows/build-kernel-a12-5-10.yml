@@ -1,4 +1,4 @@
-name: 编译 GKI 内核 5.10（小米平板6 Max 14 专用）
+name: 编译纯GKI内核5.10（小米平板6 Max 14专用）
 permissions:
   contents: write
   actions: write
@@ -24,23 +24,13 @@ jobs:
         run: |
           git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git -b lineage-19.1 gcc
 
-      - name: 拉取小米平板6 Max 14 驱动模块（修复分支问题）
-        run: |
-          git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git vendor-kernel
-          cd vendor-kernel
-          # 改为使用存在的 yudi 分支
-          git checkout yudi
-          # 直接复制驱动模块到内核目录
-          cp -r drivers/* ../kernel/drivers/
-          cd ..
-
-      - name: 应用 KernelSU + SUSFS 模块补丁（GKI 模式）
+      - name: 应用 KernelSU 模块补丁（GKI模式）
         run: |
           cd kernel
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.6
           cd ..
 
-      - name: 配置 GKI 内核（适配 yudi 设备）
+      - name: 配置并编译GKI内核
         run: |
           cd kernel
           export ARCH=arm64
@@ -48,16 +38,16 @@ jobs:
           LTO=thin BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh
           cd ..
 
-      - name: 生成 boot.img
+      - name: 生成boot.img
         run: |
           cp kernel/out/android12-5.10/dist/Image.gz boot.img
-          zip kernel-gki-yudi.zip boot.img
+          zip kernel-gki-pure.zip boot.img
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-gki-yudi
-          path: kernel-gki-yudi.zip
+          name: kernel-gki-pure
+          path: kernel-gki-pure.zip
 
   # build-kernel-a13-5-10:
   #   uses: ./.github/workflows/kernel-a13-5.10.yml
