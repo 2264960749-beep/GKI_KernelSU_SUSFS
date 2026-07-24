@@ -1,10 +1,10 @@
 name: Android 14 6.1
 permissions:
-  contents: write  # Allow writing to repository contents (for pushing tags)
-  actions: write   # Allows triggering actions
-
+  contents: write
+  actions: write
 on:
-  workflow_call:  # This allows this workflow to be called from another workflow
+  workflow_dispatch:
+  workflow_call:
     inputs:
       make_release:
         required: true
@@ -32,68 +32,84 @@ on:
         required: true
         type: boolean
         default: true
-      BBG:
-        description: '是否启用内核层面阻止对关键分区/设备节点的非法写入(LSM)？'
-        required: true
-        type: boolean
-        default: false
-
 jobs:
-  build-kernel-a14-6-1-kernelsu-susfs:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          #- sub_level: "25"
-          #  os_patch_level: "2023-10"
-          #- sub_level: "43"
-          #  os_patch_level: "2023-11"
-          #- sub_level: "57"
-          #  os_patch_level: "2024-01"
-          #- sub_level: "68"
-          #  os_patch_level: "2024-03"
-          #- sub_level: "75"
-          #  os_patch_level: "2024-05"
-          - sub_level: "78"
-            os_patch_level: "2024-06"
-          #- sub_level: "84"
-          #  os_patch_level: "2024-07"
-          - sub_level: "90"
-            os_patch_level: "2024-08"
-          #- sub_level: "93"
-          #  os_patch_level: "2024-09"
-          - sub_level: "99"
-            os_patch_level: "2024-10"
-          #- sub_level: "112"
-          #  os_patch_level: "2024-11"
-          #- sub_level: "115"
-          #  os_patch_level: "2024-12"
-          #- sub_level: "118"
-          #  os_patch_level: "2025-01"
-          - sub_level: "124"
-            os_patch_level: "2025-02"
-          #- sub_level: "128"
-          #  os_patch_level: "2025-03"
-          #- sub_level: "129"
-          #  os_patch_level: "2025-04"
-          #- sub_level: "134"
-          #  os_patch_level: "2025-05"
-          - sub_level: "145"
-            os_patch_level: "2025-09"
-          #- sub_level: "X"
-          #  os_patch_level: "lts"
-    uses: ./.github/workflows/gki-kernel.yml
-    secrets: inherit
-    with:
-      make_release: ${{ inputs.make_release || false }}
-      android_version: "android14"
-      kernel_version: "6.1"
-      sub_level: ${{ matrix.sub_level }}
-      os_patch_level: ${{ matrix.os_patch_level }}
-      kernelsu_variant: ${{ inputs.kernelsu_variant || 'Next' }}
-      kernelsu_branch: ${{ inputs.kernelsu_branch || 'Dev' }}
-      version: ${{ inputs.version || '' }}
-      use_zram: ${{ inputs.use_zram }}
-      use_kpm: ${{ inputs.use_kpm }}
-      supp_op: ${{ inputs.supp_op || false }}
-      BBG: ${{ inputs.BBG || false }}
+  build-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取仓库完整源码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: 安装编译依赖
+        run: |
+          sudo apt update -y
+          sudo apt install -y build-essential libssl-dev libelf-dev bison flex zip unzip clang lld llvm python3
+      - name: 下载MT6989天玑9400e适配Clang工具链
+        run: |
+          git clone https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r498229b clang
+          echo "CLANG_BIN=$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_ENV
+          echo "PATH=$CLANG_BIN:$PATH" >> $GITHUB_ENV
+      - name: 拉取补丁包 AK3 / Sukisu / SUSFS
+        run: |
+          # AK3调度补丁
+          git clone https://github.com/xxx/ak3-patch scripts/patch_ak3
+          # Sukisu GKI补丁
+          git clone https://github.com/SukisuKernel/Sukisu-Kernel-Patch scripts/patch_sukisu
+          # SUSFS 6.1 Android14专用补丁
+          git clone https://gitlab.com/simonpunk/susfs4ksu susfs
+          cd susfs && git checkout gki-android14-6.1
+      - name: 应用全部内核补丁
+        run: |
+          bash scripts/patch_ak3/apply.sh $GITHUB_WORKSPACE
+          bash scripts/patch_sukisu/apply_gki.sh $GITHUB_WORKSPACE
+          cd susfs && bash apply_patches.sh $GITHUB_WORKSPACE
+      - name: 加载PLF110设备配置并开启功能开关
+        run: |
+          export ARCH=arm64
+          make oplus_plf110_defconfig
+          # 开启完整GKI镜像编译
+          scripts/config --enable BUILD_GKI_BOOTIMG
+          # AK3调度总开关
+          scripts/config --enable CONFIG_AK3_SCHEDULER
+          # Sukisu基础开关
+          scripts/config --enable CONFIG_SUKISU
+          scripts/config --enable CONFIG_MODULES
+          # SUSFS全套隐藏功能开关
+          scripts/config --enable CONFIG_KSU_SUSFS
+          scripts/config --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+          scripts/config --enable CONFIG_KSU_SUSFS_SUS_PATH
+          scripts/config --enable CONFIG_KSU_SUSFS_SUS_MOUNT
+          # 关键：导出Oplus厂商驱动符号，可加载风驰游戏ko
+          scripts/config --enable CONFIG_OPLUS_GAME_MODULE_EXPORT
+          # 禁用小米平板专属配置
+          scripts/config --disable CONFIG_HMBIRD
+          # ZRAM、KPM保留原有开关
+          if [[ "${{ inputs.use_zram }}" == "false" ]]; then
+            scripts/config --disable CONFIG_ZRAM
+          fi
+          if [[ "${inputs.use_kpm}" == "false" ]]; then
+            scripts/config --disable CONFIG_KPM
+          fi
+      - name: 编译完整GKI内核镜像
+        run: |
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          make -j$(nproc)
+      - name: 打包AnyKernel3刷机包（嵌入原厂vendor_boot.img）
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3 anykernel
+          # 复制编译输出GKI内核
+          cp arch/arm64/boot/Image anykernel/Image
+          # 复制你上传到仓库根目录的vendor_boot.img
+          cp ./vendor_boot.img anykernel/vendor_boot.img
+          # 打包zip刷机包
+          cd anykernel
+          zip -r ../GKI-AK3-SUKISU-SUSFS-PLF110.zip *
+          cd ..
+      - name: 发布成品到Release
+        if: ${{ inputs.make_release == true }}
+        uses: softprops/action-gh-release@v1
+        with:
+          files: GKI-AK3-SUKISU-SUSFS-PLF110.zip
+          tag_name: PLF110-A14-6.1-${{ github.sha }}
+          generate_release_notes: true
