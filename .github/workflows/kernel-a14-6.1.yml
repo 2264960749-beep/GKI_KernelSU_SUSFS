@@ -7,7 +7,7 @@ jobs:
   build-kernel:
     runs-on: ubuntu-latest
     steps:
-      - name: 拉取仓库（包含已上传的内核源码）
+      - name: 拉取仓库（包含已上传的嵌套内核源码）
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -17,13 +17,19 @@ jobs:
           sudo apt update -y
           sudo apt install -y build-essential libssl-dev libelf-dev bison flex zip unzip lld llvm python3
 
+      # 自动把嵌套文件夹里的内核全部移到根目录，解决层级错误
+      - name: 移动内层内核源码至仓库根目录
+        run: |
+          mv oneplus/mt6989_v_15.0.2_ace5_race/* ./
+          rm -rf oneplus
+
       - name: 内核配置&编译
         run: |
           export ARCH=arm64
           make oplus_plf110_defconfig
           make -j$(nproc)
 
-      - name: 打包刷机包
+      - name: 打包AnyKernel3刷机包
         run: |
           mkdir anykernel
           cp arch/arm64/boot/Image anykernel/
@@ -31,7 +37,9 @@ jobs:
           zip -r ../kernel.zip Image
           cd ..
 
-      - name: 发布
+      - name: 发布刷机包到Releases
         uses: softprops/action-gh-release@v1
         with:
           files: kernel.zip
+          tag_name: PLF110-A14-6.1-${{ github.sha }}
+          generate_release_notes: true
