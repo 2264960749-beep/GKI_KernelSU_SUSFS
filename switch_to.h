@@ -1,15 +1,27 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-#ifndef __ALPHA_SWITCH_TO_H
-#define __ALPHA_SWITCH_TO_H
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
+ */
 
+#ifndef _ASM_ARC_SWITCH_TO_H
+#define _ASM_ARC_SWITCH_TO_H
 
-struct task_struct;
-extern struct task_struct *alpha_switch_to(unsigned long, struct task_struct *);
+#ifndef __ASSEMBLY__
 
-#define switch_to(P,N,L)						 \
-  do {									 \
-    (L) = alpha_switch_to(virt_to_phys(&task_thread_info(N)->pcb), (P)); \
-    check_mmu_context();						 \
-  } while (0)
+#include <linux/sched.h>
+#include <asm/dsp-impl.h>
+#include <asm/fpu.h>
 
-#endif /* __ALPHA_SWITCH_TO_H */
+struct task_struct *__switch_to(struct task_struct *p, struct task_struct *n);
+
+#define switch_to(prev, next, last)	\
+do {					\
+	dsp_save_restore(prev, next);	\
+	fpu_save_restore(prev, next);	\
+	last = __switch_to(prev, next);\
+	mb();				\
+} while (0)
+
+#endif
+
+#endif

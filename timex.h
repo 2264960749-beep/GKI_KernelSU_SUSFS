@@ -1,33 +1,15 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * linux/include/asm-alpha/timex.h
- *
- * ALPHA architecture timex specifications
- */
-#ifndef _ASMALPHA_TIMEX_H
-#define _ASMALPHA_TIMEX_H
-
-/* With only one or two oddballs, we use the RTC as the ticker, selecting
-   the 32.768kHz reference clock, which nicely divides down to our HZ.  */
-#define CLOCK_TICK_RATE	32768
-
-/*
- * Standard way to access the cycle counter.
- * Currently only used on SMP for scheduling.
- *
- * Only the low 32 bits are available as a continuously counting entity. 
- * But this only means we'll force a reschedule every 8 seconds or so,
- * which isn't an evil thing.
+ * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
  */
 
-typedef unsigned int cycles_t;
+#ifndef _ASM_ARC_TIMEX_H
+#define _ASM_ARC_TIMEX_H
 
-static inline cycles_t get_cycles (void)
-{
-	cycles_t ret;
-	__asm__ __volatile__ ("rpcc %0" : "=r"(ret));
-	return ret;
-}
-#define get_cycles get_cycles
+#define CLOCK_TICK_RATE	80000000 /* slated to be removed */
 
-#endif
+#include <asm-generic/timex.h>
+
+/* XXX: get_cycles() to be implemented with RTSC insn */
+
+#endif /* _ASM_ARC_TIMEX_H */

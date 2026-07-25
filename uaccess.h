@@ -1,292 +1,643 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-#ifndef __ALPHA_UACCESS_H
-#define __ALPHA_UACCESS_H
-
-#include <asm-generic/access_ok.h>
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * These are the main single-value transfer routines.  They automatically
- * use the right size if we just have the right pointer type.
+ * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
  *
- * As the alpha uses the same address space for kernel and user
- * data, we can just do these as direct assignments.  (Of course, the
- * exception handling means that it's no longer "just"...)
+ * vineetg: June 2010
+ *    -__clear_user( ) called multiple times during elf load was byte loop
+ *    converted to do as much word clear as possible.
  *
- * Careful to not
- * (a) re-use the arguments for side effects (sizeof/typeof is ok)
- * (b) require any knowledge of processes at this stage
+ * vineetg: Dec 2009
+ *    -Hand crafted constant propagation for "constant" copy sizes
+ *    -stock kernel shrunk by 33K at -O3
+ *
+ * vineetg: Sept 2009
+ *    -Added option to (UN)inline copy_(to|from)_user to reduce code sz
+ *    -kernel shrunk by 200K even at -O3 (gcc 4.2.1)
+ *    -Enabled when doing -Os
+ *
+ * Amit Bhor, Sameer Dhavale: Codito Technologies 2004
  */
-#define put_user(x, ptr) \
-  __put_user_check((__typeof__(*(ptr)))(x), (ptr), sizeof(*(ptr)))
-#define get_user(x, ptr) \
-  __get_user_check((x), (ptr), sizeof(*(ptr)))
 
-/*
- * The "__xxx" versions do not do address space checking, useful when
- * doing multiple accesses to the same area (the programmer has to do the
- * checks by hand with "access_ok()")
- */
-#define __put_user(x, ptr) \
-  __put_user_nocheck((__typeof__(*(ptr)))(x), (ptr), sizeof(*(ptr)))
-#define __get_user(x, ptr) \
-  __get_user_nocheck((x), (ptr), sizeof(*(ptr)))
-  
-/*
- * The "lda %1, 2b-1b(%0)" bits are magic to get the assembler to
- * encode the bits we need for resolving the exception.  See the
- * more extensive comments with fixup_inline_exception below for
- * more information.
- */
-#define EXC(label,cont,res,err)				\
-	".section __ex_table,\"a\"\n"			\
-	"	.long "#label"-.\n"			\
-	"	lda "#res","#cont"-"#label"("#err")\n"	\
-	".previous\n"
+#ifndef _ASM_ARC_UACCESS_H
+#define _ASM_ARC_UACCESS_H
 
-extern void __get_user_unknown(void);
+#include <linux/string.h>	/* for generic string functions */
 
-#define __get_user_nocheck(x, ptr, size)			\
+/*********** Single byte/hword/word copies ******************/
+
+#define __get_user_fn(sz, u, k)					\
 ({								\
-	long __gu_err = 0;					\
-	unsigned long __gu_val;					\
-	__chk_user_ptr(ptr);					\
-	switch (size) {						\
-	  case 1: __get_user_8(ptr); break;			\
-	  case 2: __get_user_16(ptr); break;			\
-	  case 4: __get_user_32(ptr); break;			\
-	  case 8: __get_user_64(ptr); break;			\
-	  default: __get_user_unknown(); break;			\
+	long __ret = 0;	/* success by default */	\
+	switch (sz) {						\
+	case 1: __arc_get_user_one(*(k), u, "ldb", __ret); break;	\
+	case 2: __arc_get_user_one(*(k), u, "ldw", __ret); break;	\
+	case 4: __arc_get_user_one(*(k), u, "ld", __ret);  break;	\
+	case 8: __arc_get_user_one_64(*(k), u, __ret);     break;	\
 	}							\
-	(x) = (__force __typeof__(*(ptr))) __gu_val;		\
-	__gu_err;						\
-})
-
-#define __get_user_check(x, ptr, size)				\
-({								\
-	long __gu_err = -EFAULT;				\
-	unsigned long __gu_val = 0;				\
-	const __typeof__(*(ptr)) __user *__gu_addr = (ptr);	\
-	if (__access_ok(__gu_addr, size)) {			\
-		__gu_err = 0;					\
-		switch (size) {					\
-		  case 1: __get_user_8(__gu_addr); break;	\
-		  case 2: __get_user_16(__gu_addr); break;	\
-		  case 4: __get_user_32(__gu_addr); break;	\
-		  case 8: __get_user_64(__gu_addr); break;	\
-		  default: __get_user_unknown(); break;		\
-		}						\
-	}							\
-	(x) = (__force __typeof__(*(ptr))) __gu_val;		\
-	__gu_err;						\
-})
-
-struct __large_struct { unsigned long buf[100]; };
-#define __m(x) (*(struct __large_struct __user *)(x))
-
-#define __get_user_64(addr)				\
-	__asm__("1: ldq %0,%2\n"			\
-	"2:\n"						\
-	EXC(1b,2b,%0,%1)				\
-		: "=r"(__gu_val), "=r"(__gu_err)	\
-		: "m"(__m(addr)), "1"(__gu_err))
-
-#define __get_user_32(addr)				\
-	__asm__("1: ldl %0,%2\n"			\
-	"2:\n"						\
-	EXC(1b,2b,%0,%1)				\
-		: "=r"(__gu_val), "=r"(__gu_err)	\
-		: "m"(__m(addr)), "1"(__gu_err))
-
-#ifdef __alpha_bwx__
-/* Those lucky bastards with ev56 and later CPUs can do byte/word moves.  */
-
-#define __get_user_16(addr)				\
-	__asm__("1: ldwu %0,%2\n"			\
-	"2:\n"						\
-	EXC(1b,2b,%0,%1)				\
-		: "=r"(__gu_val), "=r"(__gu_err)	\
-		: "m"(__m(addr)), "1"(__gu_err))
-
-#define __get_user_8(addr)				\
-	__asm__("1: ldbu %0,%2\n"			\
-	"2:\n"						\
-	EXC(1b,2b,%0,%1)				\
-		: "=r"(__gu_val), "=r"(__gu_err)	\
-		: "m"(__m(addr)), "1"(__gu_err))
-#else
-/* Unfortunately, we can't get an unaligned access trap for the sub-word
-   load, so we have to do a general unaligned operation.  */
-
-#define __get_user_16(addr)						\
-{									\
-	long __gu_tmp;							\
-	__asm__("1: ldq_u %0,0(%3)\n"					\
-	"2:	ldq_u %1,1(%3)\n"					\
-	"	extwl %0,%3,%0\n"					\
-	"	extwh %1,%3,%1\n"					\
-	"	or %0,%1,%0\n"						\
-	"3:\n"								\
-	EXC(1b,3b,%0,%2)						\
-	EXC(2b,3b,%0,%2)						\
-		: "=&r"(__gu_val), "=&r"(__gu_tmp), "=r"(__gu_err)	\
-		: "r"(addr), "2"(__gu_err));				\
-}
-
-#define __get_user_8(addr)						\
-	__asm__("1: ldq_u %0,0(%2)\n"					\
-	"	extbl %0,%2,%0\n"					\
-	"2:\n"								\
-	EXC(1b,2b,%0,%1)						\
-		: "=&r"(__gu_val), "=r"(__gu_err)			\
-		: "r"(addr), "1"(__gu_err))
-#endif
-
-extern void __put_user_unknown(void);
-
-#define __put_user_nocheck(x, ptr, size)			\
-({								\
-	long __pu_err = 0;					\
-	__chk_user_ptr(ptr);					\
-	switch (size) {						\
-	  case 1: __put_user_8(x, ptr); break;			\
-	  case 2: __put_user_16(x, ptr); break;			\
-	  case 4: __put_user_32(x, ptr); break;			\
-	  case 8: __put_user_64(x, ptr); break;			\
-	  default: __put_user_unknown(); break;			\
-	}							\
-	__pu_err;						\
-})
-
-#define __put_user_check(x, ptr, size)				\
-({								\
-	long __pu_err = -EFAULT;				\
-	__typeof__(*(ptr)) __user *__pu_addr = (ptr);		\
-	if (__access_ok(__pu_addr, size)) {			\
-		__pu_err = 0;					\
-		switch (size) {					\
-		  case 1: __put_user_8(x, __pu_addr); break;	\
-		  case 2: __put_user_16(x, __pu_addr); break;	\
-		  case 4: __put_user_32(x, __pu_addr); break;	\
-		  case 8: __put_user_64(x, __pu_addr); break;	\
-		  default: __put_user_unknown(); break;		\
-		}						\
-	}							\
-	__pu_err;						\
+	__ret;							\
 })
 
 /*
- * The "__put_user_xx()" macros tell gcc they read from memory
- * instead of writing: this is because they do not write to
- * any memory gcc knows about, so there are no aliasing issues
+ * Returns 0 on success, -EFAULT if not.
+ * @ret already contains 0 - given that errors will be less likely
+ * (hence +r asm constraint below).
+ * In case of error, fixup code will make it -EFAULT
  */
-#define __put_user_64(x, addr)					\
-__asm__ __volatile__("1: stq %r2,%1\n"				\
-	"2:\n"							\
-	EXC(1b,2b,$31,%0)					\
-		: "=r"(__pu_err)				\
-		: "m" (__m(addr)), "rJ" (x), "0"(__pu_err))
+#define __arc_get_user_one(dst, src, op, ret)	\
+	__asm__ __volatile__(                   \
+	"1:	"op"    %1,[%2]\n"		\
+	"2:	;nop\n"				\
+	"	.section .fixup, \"ax\"\n"	\
+	"	.align 4\n"			\
+	"3:	# return -EFAULT\n"		\
+	"	mov %0, %3\n"			\
+	"	# zero out dst ptr\n"		\
+	"	mov %1,  0\n"			\
+	"	j   2b\n"			\
+	"	.previous\n"			\
+	"	.section __ex_table, \"a\"\n"	\
+	"	.align 4\n"			\
+	"	.word 1b,3b\n"			\
+	"	.previous\n"			\
+						\
+	: "+r" (ret), "=r" (dst)		\
+	: "r" (src), "ir" (-EFAULT))
 
-#define __put_user_32(x, addr)					\
-__asm__ __volatile__("1: stl %r2,%1\n"				\
-	"2:\n"							\
-	EXC(1b,2b,$31,%0)					\
-		: "=r"(__pu_err)				\
-		: "m"(__m(addr)), "rJ"(x), "0"(__pu_err))
+#define __arc_get_user_one_64(dst, src, ret)	\
+	__asm__ __volatile__(                   \
+	"1:	ld   %1,[%2]\n"			\
+	"4:	ld  %R1,[%2, 4]\n"		\
+	"2:	;nop\n"				\
+	"	.section .fixup, \"ax\"\n"	\
+	"	.align 4\n"			\
+	"3:	# return -EFAULT\n"		\
+	"	mov %0, %3\n"			\
+	"	# zero out dst ptr\n"		\
+	"	mov %1,  0\n"			\
+	"	mov %R1, 0\n"			\
+	"	j   2b\n"			\
+	"	.previous\n"			\
+	"	.section __ex_table, \"a\"\n"	\
+	"	.align 4\n"			\
+	"	.word 1b,3b\n"			\
+	"	.word 4b,3b\n"			\
+	"	.previous\n"			\
+						\
+	: "+r" (ret), "=r" (dst)		\
+	: "r" (src), "ir" (-EFAULT))
 
-#ifdef __alpha_bwx__
-/* Those lucky bastards with ev56 and later CPUs can do byte/word moves.  */
+#define __put_user_fn(sz, u, k)					\
+({								\
+	long __ret = 0;	/* success by default */	\
+	switch (sz) {						\
+	case 1: __arc_put_user_one(*(k), u, "stb", __ret); break;	\
+	case 2: __arc_put_user_one(*(k), u, "stw", __ret); break;	\
+	case 4: __arc_put_user_one(*(k), u, "st", __ret);  break;	\
+	case 8: __arc_put_user_one_64(*(k), u, __ret);     break;	\
+	}							\
+	__ret;							\
+})
 
-#define __put_user_16(x, addr)					\
-__asm__ __volatile__("1: stw %r2,%1\n"				\
-	"2:\n"							\
-	EXC(1b,2b,$31,%0)					\
-		: "=r"(__pu_err)				\
-		: "m"(__m(addr)), "rJ"(x), "0"(__pu_err))
+#define __arc_put_user_one(src, dst, op, ret)	\
+	__asm__ __volatile__(                   \
+	"1:	"op"    %1,[%2]\n"		\
+	"2:	;nop\n"				\
+	"	.section .fixup, \"ax\"\n"	\
+	"	.align 4\n"			\
+	"3:	mov %0, %3\n"			\
+	"	j   2b\n"			\
+	"	.previous\n"			\
+	"	.section __ex_table, \"a\"\n"	\
+	"	.align 4\n"			\
+	"	.word 1b,3b\n"			\
+	"	.previous\n"			\
+						\
+	: "+r" (ret)				\
+	: "r" (src), "r" (dst), "ir" (-EFAULT))
 
-#define __put_user_8(x, addr)					\
-__asm__ __volatile__("1: stb %r2,%1\n"				\
-	"2:\n"							\
-	EXC(1b,2b,$31,%0)					\
-		: "=r"(__pu_err)				\
-		: "m"(__m(addr)), "rJ"(x), "0"(__pu_err))
-#else
-/* Unfortunately, we can't get an unaligned access trap for the sub-word
-   write, so we have to do a general unaligned operation.  */
+#define __arc_put_user_one_64(src, dst, ret)	\
+	__asm__ __volatile__(                   \
+	"1:	st   %1,[%2]\n"			\
+	"4:	st  %R1,[%2, 4]\n"		\
+	"2:	;nop\n"				\
+	"	.section .fixup, \"ax\"\n"	\
+	"	.align 4\n"			\
+	"3:	mov %0, %3\n"			\
+	"	j   2b\n"			\
+	"	.previous\n"			\
+	"	.section __ex_table, \"a\"\n"	\
+	"	.align 4\n"			\
+	"	.word 1b,3b\n"			\
+	"	.word 4b,3b\n"			\
+	"	.previous\n"			\
+						\
+	: "+r" (ret)				\
+	: "r" (src), "r" (dst), "ir" (-EFAULT))
 
-#define __put_user_16(x, addr)					\
-{								\
-	long __pu_tmp1, __pu_tmp2, __pu_tmp3, __pu_tmp4;	\
-	__asm__ __volatile__(					\
-	"1:	ldq_u %2,1(%5)\n"				\
-	"2:	ldq_u %1,0(%5)\n"				\
-	"	inswh %6,%5,%4\n"				\
-	"	inswl %6,%5,%3\n"				\
-	"	mskwh %2,%5,%2\n"				\
-	"	mskwl %1,%5,%1\n"				\
-	"	or %2,%4,%2\n"					\
-	"	or %1,%3,%1\n"					\
-	"3:	stq_u %2,1(%5)\n"				\
-	"4:	stq_u %1,0(%5)\n"				\
-	"5:\n"							\
-	EXC(1b,5b,$31,%0)					\
-	EXC(2b,5b,$31,%0)					\
-	EXC(3b,5b,$31,%0)					\
-	EXC(4b,5b,$31,%0)					\
-		: "=r"(__pu_err), "=&r"(__pu_tmp1), 		\
-		  "=&r"(__pu_tmp2), "=&r"(__pu_tmp3), 		\
-		  "=&r"(__pu_tmp4)				\
-		: "r"(addr), "r"((unsigned long)(x)), "0"(__pu_err)); \
-}
-
-#define __put_user_8(x, addr)					\
-{								\
-	long __pu_tmp1, __pu_tmp2;				\
-	__asm__ __volatile__(					\
-	"1:	ldq_u %1,0(%4)\n"				\
-	"	insbl %3,%4,%2\n"				\
-	"	mskbl %1,%4,%1\n"				\
-	"	or %1,%2,%1\n"					\
-	"2:	stq_u %1,0(%4)\n"				\
-	"3:\n"							\
-	EXC(1b,3b,$31,%0)					\
-	EXC(2b,3b,$31,%0)					\
-		: "=r"(__pu_err), 				\
-	  	  "=&r"(__pu_tmp1), "=&r"(__pu_tmp2)		\
-		: "r"((unsigned long)(x)), "r"(addr), "0"(__pu_err)); \
-}
-#endif
-
-
-/*
- * Complex access routines
- */
-
-extern long __copy_user(void *to, const void *from, long len);
 
 static inline unsigned long
-raw_copy_from_user(void *to, const void __user *from, unsigned long len)
+raw_copy_from_user(void *to, const void __user *from, unsigned long n)
 {
-	return __copy_user(to, (__force const void *)from, len);
+	long res = 0;
+	char val;
+	unsigned long tmp1, tmp2, tmp3, tmp4;
+	unsigned long orig_n = n;
+
+	if (n == 0)
+		return 0;
+
+	/* unaligned */
+	if (((unsigned long)to & 0x3) || ((unsigned long)from & 0x3)) {
+
+		unsigned char tmp;
+
+		__asm__ __volatile__ (
+		"	mov.f   lp_count, %0		\n"
+		"	lpnz 2f				\n"
+		"1:	ldb.ab  %1, [%3, 1]		\n"
+		"	stb.ab  %1, [%2, 1]		\n"
+		"	sub     %0,%0,1			\n"
+		"2:	;nop				\n"
+		"	.section .fixup, \"ax\"		\n"
+		"	.align 4			\n"
+		"3:	j   2b				\n"
+		"	.previous			\n"
+		"	.section __ex_table, \"a\"	\n"
+		"	.align 4			\n"
+		"	.word   1b, 3b			\n"
+		"	.previous			\n"
+
+		: "+r" (n),
+		/*
+		 * Note as an '&' earlyclobber operand to make sure the
+		 * temporary register inside the loop is not the same as
+		 *  FROM or TO.
+		*/
+		  "=&r" (tmp), "+r" (to), "+r" (from)
+		:
+		: "lp_count", "memory");
+
+		return n;
+	}
+
+	/*
+	 * Hand-crafted constant propagation to reduce code sz of the
+	 * laddered copy 16x,8,4,2,1
+	 */
+	if (__builtin_constant_p(orig_n)) {
+		res = orig_n;
+
+		if (orig_n / 16) {
+			orig_n = orig_n % 16;
+
+			__asm__ __volatile__(
+			"	lsr   lp_count, %7,4		\n"
+			"	lp    3f			\n"
+			"1:	ld.ab   %3, [%2, 4]		\n"
+			"11:	ld.ab   %4, [%2, 4]		\n"
+			"12:	ld.ab   %5, [%2, 4]		\n"
+			"13:	ld.ab   %6, [%2, 4]		\n"
+			"	st.ab   %3, [%1, 4]		\n"
+			"	st.ab   %4, [%1, 4]		\n"
+			"	st.ab   %5, [%1, 4]		\n"
+			"	st.ab   %6, [%1, 4]		\n"
+			"	sub     %0,%0,16		\n"
+			"3:	;nop				\n"
+			"	.section .fixup, \"ax\"		\n"
+			"	.align 4			\n"
+			"4:	j   3b				\n"
+			"	.previous			\n"
+			"	.section __ex_table, \"a\"	\n"
+			"	.align 4			\n"
+			"	.word   1b, 4b			\n"
+			"	.word   11b,4b			\n"
+			"	.word   12b,4b			\n"
+			"	.word   13b,4b			\n"
+			"	.previous			\n"
+			: "+r" (res), "+r"(to), "+r"(from),
+			  "=r"(tmp1), "=r"(tmp2), "=r"(tmp3), "=r"(tmp4)
+			: "ir"(n)
+			: "lp_count", "memory");
+		}
+		if (orig_n / 8) {
+			orig_n = orig_n % 8;
+
+			__asm__ __volatile__(
+			"14:	ld.ab   %3, [%2,4]		\n"
+			"15:	ld.ab   %4, [%2,4]		\n"
+			"	st.ab   %3, [%1,4]		\n"
+			"	st.ab   %4, [%1,4]		\n"
+			"	sub     %0,%0,8			\n"
+			"31:	;nop				\n"
+			"	.section .fixup, \"ax\"		\n"
+			"	.align 4			\n"
+			"4:	j   31b				\n"
+			"	.previous			\n"
+			"	.section __ex_table, \"a\"	\n"
+			"	.align 4			\n"
+			"	.word   14b,4b			\n"
+			"	.word   15b,4b			\n"
+			"	.previous			\n"
+			: "+r" (res), "+r"(to), "+r"(from),
+			  "=r"(tmp1), "=r"(tmp2)
+			:
+			: "memory");
+		}
+		if (orig_n / 4) {
+			orig_n = orig_n % 4;
+
+			__asm__ __volatile__(
+			"16:	ld.ab   %3, [%2,4]		\n"
+			"	st.ab   %3, [%1,4]		\n"
+			"	sub     %0,%0,4			\n"
+			"32:	;nop				\n"
+			"	.section .fixup, \"ax\"		\n"
+			"	.align 4			\n"
+			"4:	j   32b				\n"
+			"	.previous			\n"
+			"	.section __ex_table, \"a\"	\n"
+			"	.align 4			\n"
+			"	.word   16b,4b			\n"
+			"	.previous			\n"
+			: "+r" (res), "+r"(to), "+r"(from), "=r"(tmp1)
+			:
+			: "memory");
+		}
+		if (orig_n / 2) {
+			orig_n = orig_n % 2;
+
+			__asm__ __volatile__(
+			"17:	ldw.ab   %3, [%2,2]		\n"
+			"	stw.ab   %3, [%1,2]		\n"
+			"	sub      %0,%0,2		\n"
+			"33:	;nop				\n"
+			"	.section .fixup, \"ax\"		\n"
+			"	.align 4			\n"
+			"4:	j   33b				\n"
+			"	.previous			\n"
+			"	.section __ex_table, \"a\"	\n"
+			"	.align 4			\n"
+			"	.word   17b,4b			\n"
+			"	.previous			\n"
+			: "+r" (res), "+r"(to), "+r"(from), "=r"(tmp1)
+			:
+			: "memory");
+		}
+		if (orig_n & 1) {
+			__asm__ __volatile__(
+			"18:	ldb.ab   %3, [%2,2]		\n"
+			"	stb.ab   %3, [%1,2]		\n"
+			"	sub      %0,%0,1		\n"
+			"34:	; nop				\n"
+			"	.section .fixup, \"ax\"		\n"
+			"	.align 4			\n"
+			"4:	j   34b				\n"
+			"	.previous			\n"
+			"	.section __ex_table, \"a\"	\n"
+			"	.align 4			\n"
+			"	.word   18b,4b			\n"
+			"	.previous			\n"
+			: "+r" (res), "+r"(to), "+r"(from), "=r"(tmp1)
+			:
+			: "memory");
+		}
+	} else {  /* n is NOT constant, so laddered copy of 16x,8,4,2,1  */
+
+		__asm__ __volatile__(
+		"	mov %0,%3			\n"
+		"	lsr.f   lp_count, %3,4		\n"  /* 16x bytes */
+		"	lpnz    3f			\n"
+		"1:	ld.ab   %5, [%2, 4]		\n"
+		"11:	ld.ab   %6, [%2, 4]		\n"
+		"12:	ld.ab   %7, [%2, 4]		\n"
+		"13:	ld.ab   %8, [%2, 4]		\n"
+		"	st.ab   %5, [%1, 4]		\n"
+		"	st.ab   %6, [%1, 4]		\n"
+		"	st.ab   %7, [%1, 4]		\n"
+		"	st.ab   %8, [%1, 4]		\n"
+		"	sub     %0,%0,16		\n"
+		"3:	and.f   %3,%3,0xf		\n"  /* stragglers */
+		"	bz      34f			\n"
+		"	bbit0   %3,3,31f		\n"  /* 8 bytes left */
+		"14:	ld.ab   %5, [%2,4]		\n"
+		"15:	ld.ab   %6, [%2,4]		\n"
+		"	st.ab   %5, [%1,4]		\n"
+		"	st.ab   %6, [%1,4]		\n"
+		"	sub.f   %0,%0,8			\n"
+		"31:	bbit0   %3,2,32f		\n"  /* 4 bytes left */
+		"16:	ld.ab   %5, [%2,4]		\n"
+		"	st.ab   %5, [%1,4]		\n"
+		"	sub.f   %0,%0,4			\n"
+		"32:	bbit0   %3,1,33f		\n"  /* 2 bytes left */
+		"17:	ldw.ab  %5, [%2,2]		\n"
+		"	stw.ab  %5, [%1,2]		\n"
+		"	sub.f   %0,%0,2			\n"
+		"33:	bbit0   %3,0,34f		\n"
+		"18:	ldb.ab  %5, [%2,1]		\n"  /* 1 byte left */
+		"	stb.ab  %5, [%1,1]		\n"
+		"	sub.f   %0,%0,1			\n"
+		"34:	;nop				\n"
+		"	.section .fixup, \"ax\"		\n"
+		"	.align 4			\n"
+		"4:	j   34b				\n"
+		"	.previous			\n"
+		"	.section __ex_table, \"a\"	\n"
+		"	.align 4			\n"
+		"	.word   1b, 4b			\n"
+		"	.word   11b,4b			\n"
+		"	.word   12b,4b			\n"
+		"	.word   13b,4b			\n"
+		"	.word   14b,4b			\n"
+		"	.word   15b,4b			\n"
+		"	.word   16b,4b			\n"
+		"	.word   17b,4b			\n"
+		"	.word   18b,4b			\n"
+		"	.previous			\n"
+		: "=r" (res), "+r"(to), "+r"(from), "+r"(n), "=r"(val),
+		  "=r"(tmp1), "=r"(tmp2), "=r"(tmp3), "=r"(tmp4)
+		:
+		: "lp_count", "memory");
+	}
+
+	return res;
 }
 
 static inline unsigned long
-raw_copy_to_user(void __user *to, const void *from, unsigned long len)
+raw_copy_to_user(void __user *to, const void *from, unsigned long n)
 {
-	return __copy_user((__force void *)to, from, len);
+	long res = 0;
+	char val;
+	unsigned long tmp1, tmp2, tmp3, tmp4;
+	unsigned long orig_n = n;
+
+	if (n == 0)
+		return 0;
+
+	/* unaligned */
+	if (((unsigned long)to & 0x3) || ((unsigned long)from & 0x3)) {
+
+		unsigned char tmp;
+
+		__asm__ __volatile__(
+		"	mov.f   lp_count, %0		\n"
+		"	lpnz 3f				\n"
+		"	ldb.ab  %1, [%3, 1]		\n"
+		"1:	stb.ab  %1, [%2, 1]		\n"
+		"	sub     %0, %0, 1		\n"
+		"3:	;nop				\n"
+		"	.section .fixup, \"ax\"		\n"
+		"	.align 4			\n"
+		"4:	j   3b				\n"
+		"	.previous			\n"
+		"	.section __ex_table, \"a\"	\n"
+		"	.align 4			\n"
+		"	.word   1b, 4b			\n"
+		"	.previous			\n"
+
+		: "+r" (n),
+		/* Note as an '&' earlyclobber operand to make sure the
+		 * temporary register inside the loop is not the same as
+		 * FROM or TO.
+		 */
+		  "=&r" (tmp), "+r" (to), "+r" (from)
+		:
+		: "lp_count", "memory");
+
+		return n;
+	}
+
+	if (__builtin_constant_p(orig_n)) {
+		res = orig_n;
+
+		if (orig_n / 16) {
+			orig_n = orig_n % 16;
+
+			__asm__ __volatile__(
+			"	lsr lp_count, %7,4		\n"
+			"	lp  3f				\n"
+			"	ld.ab %3, [%2, 4]		\n"
+			"	ld.ab %4, [%2, 4]		\n"
+			"	ld.ab %5, [%2, 4]		\n"
+			"	ld.ab %6, [%2, 4]		\n"
+			"1:	st.ab %3, [%1, 4]		\n"
+			"11:	st.ab %4, [%1, 4]		\n"
+			"12:	st.ab %5, [%1, 4]		\n"
+			"13:	st.ab %6, [%1, 4]		\n"
+			"	sub   %0, %0, 16		\n"
+			"3:;nop					\n"
+			"	.section .fixup, \"ax\"		\n"
+			"	.align 4			\n"
+			"4:	j   3b				\n"
+			"	.previous			\n"
+			"	.section __ex_table, \"a\"	\n"
+			"	.align 4			\n"
+			"	.word   1b, 4b			\n"
+			"	.word   11b,4b			\n"
+			"	.word   12b,4b			\n"
+			"	.word   13b,4b			\n"
+			"	.previous			\n"
+			: "+r" (res), "+r"(to), "+r"(from),
+			  "=r"(tmp1), "=r"(tmp2), "=r"(tmp3), "=r"(tmp4)
+			: "ir"(n)
+			: "lp_count", "memory");
+		}
+		if (orig_n / 8) {
+			orig_n = orig_n % 8;
+
+			__asm__ __volatile__(
+			"	ld.ab   %3, [%2,4]		\n"
+			"	ld.ab   %4, [%2,4]		\n"
+			"14:	st.ab   %3, [%1,4]		\n"
+			"15:	st.ab   %4, [%1,4]		\n"
+			"	sub     %0, %0, 8		\n"
+			"31:;nop				\n"
+			"	.section .fixup, \"ax\"		\n"
+			"	.align 4			\n"
+			"4:	j   31b				\n"
+			"	.previous			\n"
+			"	.section __ex_table, \"a\"	\n"
+			"	.align 4			\n"
+			"	.word   14b,4b			\n"
+			"	.word   15b,4b			\n"
+			"	.previous			\n"
+			: "+r" (res), "+r"(to), "+r"(from),
+			  "=r"(tmp1), "=r"(tmp2)
+			:
+			: "memory");
+		}
+		if (orig_n / 4) {
+			orig_n = orig_n % 4;
+
+			__asm__ __volatile__(
+			"	ld.ab   %3, [%2,4]		\n"
+			"16:	st.ab   %3, [%1,4]		\n"
+			"	sub     %0, %0, 4		\n"
+			"32:;nop				\n"
+			"	.section .fixup, \"ax\"		\n"
+			"	.align 4			\n"
+			"4:	j   32b				\n"
+			"	.previous			\n"
+			"	.section __ex_table, \"a\"	\n"
+			"	.align 4			\n"
+			"	.word   16b,4b			\n"
+			"	.previous			\n"
+			: "+r" (res), "+r"(to), "+r"(from), "=r"(tmp1)
+			:
+			: "memory");
+		}
+		if (orig_n / 2) {
+			orig_n = orig_n % 2;
+
+			__asm__ __volatile__(
+			"	ldw.ab    %3, [%2,2]		\n"
+			"17:	stw.ab    %3, [%1,2]		\n"
+			"	sub       %0, %0, 2		\n"
+			"33:;nop				\n"
+			"	.section .fixup, \"ax\"		\n"
+			"	.align 4			\n"
+			"4:	j   33b				\n"
+			"	.previous			\n"
+			"	.section __ex_table, \"a\"	\n"
+			"	.align 4			\n"
+			"	.word   17b,4b			\n"
+			"	.previous			\n"
+			: "+r" (res), "+r"(to), "+r"(from), "=r"(tmp1)
+			:
+			: "memory");
+		}
+		if (orig_n & 1) {
+			__asm__ __volatile__(
+			"	ldb.ab  %3, [%2,1]		\n"
+			"18:	stb.ab  %3, [%1,1]		\n"
+			"	sub     %0, %0, 1		\n"
+			"34:	;nop				\n"
+			"	.section .fixup, \"ax\"		\n"
+			"	.align 4			\n"
+			"4:	j   34b				\n"
+			"	.previous			\n"
+			"	.section __ex_table, \"a\"	\n"
+			"	.align 4			\n"
+			"	.word   18b,4b			\n"
+			"	.previous			\n"
+			: "+r" (res), "+r"(to), "+r"(from), "=r"(tmp1)
+			:
+			: "memory");
+		}
+	} else {  /* n is NOT constant, so laddered copy of 16x,8,4,2,1  */
+
+		__asm__ __volatile__(
+		"	mov   %0,%3			\n"
+		"	lsr.f lp_count, %3,4		\n"  /* 16x bytes */
+		"	lpnz  3f			\n"
+		"	ld.ab %5, [%2, 4]		\n"
+		"	ld.ab %6, [%2, 4]		\n"
+		"	ld.ab %7, [%2, 4]		\n"
+		"	ld.ab %8, [%2, 4]		\n"
+		"1:	st.ab %5, [%1, 4]		\n"
+		"11:	st.ab %6, [%1, 4]		\n"
+		"12:	st.ab %7, [%1, 4]		\n"
+		"13:	st.ab %8, [%1, 4]		\n"
+		"	sub   %0, %0, 16		\n"
+		"3:	and.f %3,%3,0xf			\n" /* stragglers */
+		"	bz 34f				\n"
+		"	bbit0   %3,3,31f		\n" /* 8 bytes left */
+		"	ld.ab   %5, [%2,4]		\n"
+		"	ld.ab   %6, [%2,4]		\n"
+		"14:	st.ab   %5, [%1,4]		\n"
+		"15:	st.ab   %6, [%1,4]		\n"
+		"	sub.f   %0, %0, 8		\n"
+		"31:	bbit0   %3,2,32f		\n"  /* 4 bytes left */
+		"	ld.ab   %5, [%2,4]		\n"
+		"16:	st.ab   %5, [%1,4]		\n"
+		"	sub.f   %0, %0, 4		\n"
+		"32:	bbit0 %3,1,33f			\n"  /* 2 bytes left */
+		"	ldw.ab    %5, [%2,2]		\n"
+		"17:	stw.ab    %5, [%1,2]		\n"
+		"	sub.f %0, %0, 2			\n"
+		"33:	bbit0 %3,0,34f			\n"
+		"	ldb.ab    %5, [%2,1]		\n"  /* 1 byte left */
+		"18:	stb.ab  %5, [%1,1]		\n"
+		"	sub.f %0, %0, 1			\n"
+		"34:	;nop				\n"
+		"	.section .fixup, \"ax\"		\n"
+		"	.align 4			\n"
+		"4:	j   34b				\n"
+		"	.previous			\n"
+		"	.section __ex_table, \"a\"	\n"
+		"	.align 4			\n"
+		"	.word   1b, 4b			\n"
+		"	.word   11b,4b			\n"
+		"	.word   12b,4b			\n"
+		"	.word   13b,4b			\n"
+		"	.word   14b,4b			\n"
+		"	.word   15b,4b			\n"
+		"	.word   16b,4b			\n"
+		"	.word   17b,4b			\n"
+		"	.word   18b,4b			\n"
+		"	.previous			\n"
+		: "=r" (res), "+r"(to), "+r"(from), "+r"(n), "=r"(val),
+		  "=r"(tmp1), "=r"(tmp2), "=r"(tmp3), "=r"(tmp4)
+		:
+		: "lp_count", "memory");
+	}
+
+	return res;
 }
 
-extern long __clear_user(void __user *to, long len);
-
-static inline long
-clear_user(void __user *to, long len)
+static inline unsigned long __arc_clear_user(void __user *to, unsigned long n)
 {
-	if (__access_ok(to, len))
-		len = __clear_user(to, len);
-	return len;
+	long res = n;
+	unsigned char *d_char = to;
+
+	__asm__ __volatile__(
+	"	bbit0   %0, 0, 1f		\n"
+	"75:	stb.ab  %2, [%0,1]		\n"
+	"	sub %1, %1, 1			\n"
+	"1:	bbit0   %0, 1, 2f		\n"
+	"76:	stw.ab  %2, [%0,2]		\n"
+	"	sub %1, %1, 2			\n"
+	"2:	asr.f   lp_count, %1, 2		\n"
+	"	lpnz    3f			\n"
+	"77:	st.ab   %2, [%0,4]		\n"
+	"	sub %1, %1, 4			\n"
+	"3:	bbit0   %1, 1, 4f		\n"
+	"78:	stw.ab  %2, [%0,2]		\n"
+	"	sub %1, %1, 2			\n"
+	"4:	bbit0   %1, 0, 5f		\n"
+	"79:	stb.ab  %2, [%0,1]		\n"
+	"	sub %1, %1, 1			\n"
+	"5:					\n"
+	"	.section .fixup, \"ax\"		\n"
+	"	.align 4			\n"
+	"3:	j   5b				\n"
+	"	.previous			\n"
+	"	.section __ex_table, \"a\"	\n"
+	"	.align 4			\n"
+	"	.word   75b, 3b			\n"
+	"	.word   76b, 3b			\n"
+	"	.word   77b, 3b			\n"
+	"	.word   78b, 3b			\n"
+	"	.word   79b, 3b			\n"
+	"	.previous			\n"
+	: "+r"(d_char), "+r"(res)
+	: "i"(0)
+	: "lp_count", "memory");
+
+	return res;
 }
 
-extern long strncpy_from_user(char *dest, const char __user *src, long count);
-extern __must_check long strnlen_user(const char __user *str, long n);
+#ifndef CONFIG_CC_OPTIMIZE_FOR_SIZE
 
-#include <asm/extable.h>
+#define INLINE_COPY_TO_USER
+#define INLINE_COPY_FROM_USER
 
-#endif /* __ALPHA_UACCESS_H */
+#define __clear_user(d, n)		__arc_clear_user(d, n)
+#else
+extern unsigned long arc_clear_user_noinline(void __user *to,
+		unsigned long n);
+#define __clear_user(d, n)		arc_clear_user_noinline(d, n)
+#endif
+
+#include <asm-generic/uaccess.h>
+
+#endif

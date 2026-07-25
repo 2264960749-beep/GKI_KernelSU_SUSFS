@@ -1,74 +1,107 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * include/asm-alpha/processor.h
+ * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
  *
- * Copyright (C) 1994 Linus Torvalds
+ * vineetg: March 2009
+ *  -Implemented task_pt_regs( )
+ *
+ * Amit Bhor, Sameer Dhavale, Ashwin Chaugule: Codito Technologies 2004
  */
 
-#ifndef __ASM_ALPHA_PROCESSOR_H
-#define __ASM_ALPHA_PROCESSOR_H
+#ifndef __ASM_ARC_PROCESSOR_H
+#define __ASM_ARC_PROCESSOR_H
 
-#include <linux/personality.h>	/* for ADDR_LIMIT_32BIT */
+#ifndef __ASSEMBLY__
+
+#include <asm/ptrace.h>
+#include <asm/dsp.h>
+#include <asm/fpu.h>
+
+/* Arch specific stuff which needs to be saved per task.
+ * However these items are not so important so as to earn a place in
+ * struct thread_info
+ */
+struct thread_struct {
+	unsigned long ksp;	/* kernel mode stack pointer */
+	unsigned long callee_reg;	/* pointer to callee regs */
+	unsigned long fault_address;	/* dbls as brkpt holder as well */
+#ifdef CONFIG_ARC_DSP_SAVE_RESTORE_REGS
+	struct dsp_callee_regs dsp;
+#endif
+#ifdef CONFIG_ARC_FPU_SAVE_RESTORE
+	struct arc_fpu fpu;
+#endif
+};
+
+#define INIT_THREAD  {                          \
+	.ksp = sizeof(init_stack) + (unsigned long) init_stack, \
+}
+
+/* Forward declaration, a strange C thing */
+struct task_struct;
+
+#define task_pt_regs(p) \
+	((struct pt_regs *)(THREAD_SIZE + (void *)task_stack_page(p)) - 1)
 
 /*
- * We have a 42-bit user address space: 4TB user VM...
+ * A lot of busy-wait loops in SMP are based off of non-volatile data otherwise
+ * get optimised away by gcc
  */
-#define TASK_SIZE (0x40000000000UL)
+#define cpu_relax()		barrier()
 
-#define STACK_TOP \
-  (current->personality & ADDR_LIMIT_32BIT ? 0x80000000 : 0x00120000000UL)
+#define KSTK_EIP(tsk)   (task_pt_regs(tsk)->ret)
+#define KSTK_ESP(tsk)   (task_pt_regs(tsk)->sp)
 
-#define STACK_TOP_MAX	0x00120000000UL
+/*
+ * Where about of Task's sp, fp, blink when it was last seen in kernel mode.
+ * Look in process.c for details of kernel stack layout
+ */
+#define TSK_K_ESP(tsk)		(tsk->thread.ksp)
+
+#define TSK_K_REG(tsk, off)	(*((unsigned long *)(TSK_K_ESP(tsk) + \
+					sizeof(struct callee_regs) + off)))
+
+#define TSK_K_BLINK(tsk)	TSK_K_REG(tsk, 4)
+#define TSK_K_FP(tsk)		TSK_K_REG(tsk, 0)
+
+extern void start_thread(struct pt_regs * regs, unsigned long pc,
+			 unsigned long usp);
+
+extern unsigned int __get_wchan(struct task_struct *p);
+
+#endif /* !__ASSEMBLY__ */
+
+/*
+ * Default System Memory Map on ARC
+ *
+ * ---------------------------- (lower 2G, Translated) -------------------------
+ * 0x0000_0000		0x5FFF_FFFF	(user vaddr: TASK_SIZE)
+ * 0x6000_0000		0x6FFF_FFFF	(reserved gutter between U/K)
+ * 0x7000_0000		0x7FFF_FFFF	(kvaddr: vmalloc/modules/pkmap..)
+ *
+ * PAGE_OFFSET ---------------- (Upper 2G, Untranslated) -----------------------
+ * 0x8000_0000		0xBFFF_FFFF	(kernel direct mapped)
+ * 0xC000_0000		0xFFFF_FFFF	(peripheral uncached space)
+ * -----------------------------------------------------------------------------
+ */
+
+#define TASK_SIZE	0x60000000
+
+#define VMALLOC_START	(PAGE_OFFSET - (CONFIG_ARC_KVADDR_SIZE << 20))
+
+/* 1 PGDIR_SIZE each for fixmap/pkmap, 2 PGDIR_SIZE gutter (see asm/highmem.h) */
+#define VMALLOC_SIZE	((CONFIG_ARC_KVADDR_SIZE << 20) - PMD_SIZE * 4)
+
+#define VMALLOC_END	(VMALLOC_START + VMALLOC_SIZE)
+
+#define USER_KERNEL_GUTTER    (VMALLOC_START - TASK_SIZE)
+
+#define STACK_TOP       TASK_SIZE
+#define STACK_TOP_MAX   STACK_TOP
 
 /* This decides where the kernel will search for a free chunk of vm
  * space during mmap's.
  */
-#define TASK_UNMAPPED_BASE \
-  ((current->personality & ADDR_LIMIT_32BIT) ? 0x40000000 : TASK_SIZE / 2)
+#define TASK_UNMAPPED_BASE      (TASK_SIZE / 3)
 
-/* This is dead.  Everything has been moved to thread_info.  */
-struct thread_struct { };
-#define INIT_THREAD  { }
-
-/* Do necessary setup to start up a newly executed thread.  */
-struct pt_regs;
-extern void start_thread(struct pt_regs *, unsigned long, unsigned long);
-
-/* Free all resources held by a thread. */
-struct task_struct;
-unsigned long __get_wchan(struct task_struct *p);
-
-#define KSTK_EIP(tsk) (task_pt_regs(tsk)->pc)
-
-#define KSTK_ESP(tsk) \
-  ((tsk) == current ? rdusp() : task_thread_info(tsk)->pcb.usp)
-
-#define cpu_relax()	barrier()
-
-#define ARCH_HAS_PREFETCH
-#define ARCH_HAS_PREFETCHW
-#define ARCH_HAS_SPINLOCK_PREFETCH
-
-#ifndef CONFIG_SMP
-/* Nothing to prefetch. */
-#define spin_lock_prefetch(lock)  	do { } while (0)
-#endif
-
-extern inline void prefetch(const void *ptr)  
-{ 
-	__builtin_prefetch(ptr, 0, 3);
-}
-
-extern inline void prefetchw(const void *ptr)  
-{
-	__builtin_prefetch(ptr, 1, 3);
-}
-
-#ifdef CONFIG_SMP
-extern inline void spin_lock_prefetch(const void *ptr)  
-{
-	__builtin_prefetch(ptr, 1, 3);
-}
-#endif
-
-#endif /* __ASM_ALPHA_PROCESSOR_H */
+#endif /* __ASM_ARC_PROCESSOR_H */

@@ -1,71 +1,186 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
-#ifndef _UAPI_ASMAXP_PTRACE_H
-#define _UAPI_ASMAXP_PTRACE_H
-
-
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * This struct defines the way the registers are stored on the
- * kernel stack during a system call or other kernel entry
+ * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
  *
- * NOTE! I want to minimize the overhead of system calls, so this
- * struct has as little information as possible. It does not have
- *
- *  - floating point regs: the kernel doesn't change those
- *  - r9-15: saved by the C compiler
- *
- * This makes "fork()" and "exec()" a bit more complex, but should
- * give us low system call latency.
+ * Amit Bhor, Sameer Dhavale: Codito Technologies 2004
  */
+#ifndef __ASM_ARC_PTRACE_H
+#define __ASM_ARC_PTRACE_H
+
+#include <uapi/asm/ptrace.h>
+#include <linux/compiler.h>
+
+#ifndef __ASSEMBLY__
+
+/* THE pt_regs: Defines how regs are saved during entry into kernel */
+
+#ifdef CONFIG_ISA_ARCOMPACT
+struct pt_regs {
+
+	/* Real registers */
+	unsigned long bta;	/* bta_l1, bta_l2, erbta */
+
+	unsigned long lp_start, lp_end, lp_count;
+
+	unsigned long status32;	/* status32_l1, status32_l2, erstatus */
+	unsigned long ret;	/* ilink1, ilink2 or eret */
+	unsigned long blink;
+	unsigned long fp;
+	unsigned long r26;	/* gp */
+
+	unsigned long r12, r11, r10, r9, r8, r7, r6, r5, r4, r3, r2, r1, r0;
+
+	unsigned long sp;	/* User/Kernel depending on where we came from */
+	unsigned long orig_r0;
+
+	/*
+	 * To distinguish bet excp, syscall, irq
+	 * For traps and exceptions, Exception Cause Register.
+	 * 	ECR: <00> <VV> <CC> <PP>
+	 * 	Last word used by Linux for extra state mgmt (syscall-restart)
+	 * For interrupts, use artificial ECR values to note current prio-level
+	 */
+	union {
+		struct {
+#ifdef CONFIG_CPU_BIG_ENDIAN
+			unsigned long state:8, ecr_vec:8,
+				      ecr_cause:8, ecr_param:8;
+#else
+			unsigned long ecr_param:8, ecr_cause:8,
+				      ecr_vec:8, state:8;
+#endif
+		};
+		unsigned long event;
+	};
+
+	unsigned long user_r25;
+};
+
+#define MAX_REG_OFFSET offsetof(struct pt_regs, user_r25)
+
+#else
 
 struct pt_regs {
-	unsigned long r0;
-	unsigned long r1;
-	unsigned long r2;
-	unsigned long r3;
-	unsigned long r4;
-	unsigned long r5;
-	unsigned long r6;
-	unsigned long r7;
-	unsigned long r8;
-	unsigned long r19;
-	unsigned long r20;
-	unsigned long r21;
-	unsigned long r22;
-	unsigned long r23;
-	unsigned long r24;
-	unsigned long r25;
-	unsigned long r26;
-	unsigned long r27;
-	unsigned long r28;
-	unsigned long hae;
-/* JRP - These are the values provided to a0-a2 by PALcode */
-	unsigned long trap_a0;
-	unsigned long trap_a1;
-	unsigned long trap_a2;
-/* These are saved by PAL-code: */
-	unsigned long ps;
-	unsigned long pc;
-	unsigned long gp;
-	unsigned long r16;
-	unsigned long r17;
-	unsigned long r18;
+
+	unsigned long orig_r0;
+
+	union {
+		struct {
+#ifdef CONFIG_CPU_BIG_ENDIAN
+			unsigned long state:8, ecr_vec:8,
+				      ecr_cause:8, ecr_param:8;
+#else
+			unsigned long ecr_param:8, ecr_cause:8,
+				      ecr_vec:8, state:8;
+#endif
+		};
+		unsigned long event;
+	};
+
+	unsigned long bta;	/* bta_l1, bta_l2, erbta */
+
+	unsigned long user_r25;
+
+	unsigned long r26;	/* gp */
+	unsigned long fp;
+	unsigned long sp;	/* user/kernel sp depending on where we came from  */
+
+	unsigned long r12, r30;
+
+#ifdef CONFIG_ARC_HAS_ACCL_REGS
+	unsigned long r58, r59;	/* ACCL/ACCH used by FPU / DSP MPY */
+#endif
+#ifdef CONFIG_ARC_DSP_SAVE_RESTORE_REGS
+	unsigned long DSP_CTRL;
+#endif
+
+	/*------- Below list auto saved by h/w -----------*/
+	unsigned long r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11;
+
+	unsigned long blink;
+	unsigned long lp_end, lp_start, lp_count;
+
+	unsigned long ei, ldi, jli;
+
+	unsigned long ret;
+	unsigned long status32;
 };
 
-/*
- * This is the extended stack used by signal handlers and the context
- * switcher: it's pushed after the normal "struct pt_regs".
- */
-struct switch_stack {
-	unsigned long r9;
-	unsigned long r10;
-	unsigned long r11;
-	unsigned long r12;
-	unsigned long r13;
-	unsigned long r14;
-	unsigned long r15;
-	unsigned long r26;
-	unsigned long fp[32];	/* fp[31] is fpcr */
+#define MAX_REG_OFFSET offsetof(struct pt_regs, status32)
+
+#endif
+
+/* Callee saved registers - need to be saved only when you are scheduled out */
+
+struct callee_regs {
+	unsigned long r25, r24, r23, r22, r21, r20, r19, r18, r17, r16, r15, r14, r13;
 };
 
+#define instruction_pointer(regs)	((regs)->ret)
+#define profile_pc(regs)		instruction_pointer(regs)
 
-#endif /* _UAPI_ASMAXP_PTRACE_H */
+/* return 1 if user mode or 0 if kernel mode */
+#define user_mode(regs) (regs->status32 & STATUS_U_MASK)
+
+#define user_stack_pointer(regs)\
+({  unsigned int sp;		\
+	if (user_mode(regs))	\
+		sp = (regs)->sp;\
+	else			\
+		sp = -1;	\
+	sp;			\
+})
+
+/* return 1 if PC in delay slot */
+#define delay_mode(regs) ((regs->status32 & STATUS_DE_MASK) == STATUS_DE_MASK)
+
+#define in_syscall(regs)    ((regs->ecr_vec == ECR_V_TRAP) && !regs->ecr_param)
+#define in_brkpt_trap(regs) ((regs->ecr_vec == ECR_V_TRAP) && regs->ecr_param)
+
+#define STATE_SCALL_RESTARTED	0x01
+
+#define syscall_wont_restart(reg) (reg->state |= STATE_SCALL_RESTARTED)
+#define syscall_restartable(reg) !(reg->state &  STATE_SCALL_RESTARTED)
+
+#define current_pt_regs()					\
+({								\
+	/* open-coded current_thread_info() */			\
+	register unsigned long sp asm ("sp");			\
+	unsigned long pg_start = (sp & ~(THREAD_SIZE - 1));	\
+	(struct pt_regs *)(pg_start + THREAD_SIZE) - 1;	\
+})
+
+static inline long regs_return_value(struct pt_regs *regs)
+{
+	return (long)regs->r0;
+}
+
+static inline void instruction_pointer_set(struct pt_regs *regs,
+					   unsigned long val)
+{
+	instruction_pointer(regs) = val;
+}
+
+static inline unsigned long kernel_stack_pointer(struct pt_regs *regs)
+{
+	return regs->sp;
+}
+
+extern int regs_query_register_offset(const char *name);
+extern const char *regs_query_register_name(unsigned int offset);
+extern bool regs_within_kernel_stack(struct pt_regs *regs, unsigned long addr);
+extern unsigned long regs_get_kernel_stack_nth(struct pt_regs *regs,
+					       unsigned int n);
+
+static inline unsigned long regs_get_register(struct pt_regs *regs,
+					      unsigned int offset)
+{
+	if (unlikely(offset > MAX_REG_OFFSET))
+		return 0;
+
+	return *(unsigned long *)((unsigned long)regs + offset);
+}
+
+#endif /* !__ASSEMBLY__ */
+
+#endif /* __ASM_PTRACE_H */

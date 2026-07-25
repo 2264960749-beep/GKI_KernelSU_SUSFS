@@ -1,112 +1,106 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-#ifndef _ALPHA_THREAD_INFO_H
-#define _ALPHA_THREAD_INFO_H
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
+ *
+ * Vineetg: Oct 2009
+ *  No need for ARC specific thread_info allocator (kmalloc/free). This is
+ *  anyways one page allocation, thus slab alloc can be short-circuited and
+ *  the generic version (get_free_page) would be loads better.
+ *
+ * Sameer Dhavale: Codito Technologies 2004
+ */
 
-#ifdef __KERNEL__
+#ifndef _ASM_THREAD_INFO_H
+#define _ASM_THREAD_INFO_H
 
-#ifndef __ASSEMBLY__
-#include <asm/processor.h>
-#include <asm/types.h>
-#include <asm/hwrpb.h>
-#include <asm/sysinfo.h>
+#include <asm/page.h>
+
+#ifdef CONFIG_16KSTACKS
+#define THREAD_SIZE_ORDER 1
+#else
+#define THREAD_SIZE_ORDER 0
 #endif
 
+#define THREAD_SIZE     (PAGE_SIZE << THREAD_SIZE_ORDER)
+#define THREAD_SHIFT	(PAGE_SHIFT << THREAD_SIZE_ORDER)
+
 #ifndef __ASSEMBLY__
+
+#include <linux/thread_info.h>
+
+/*
+ * low level task data that entry.S needs immediate access to
+ * - this struct should fit entirely inside of one cache line
+ * - this struct shares the supervisor stack pages
+ * - if the contents of this structure are changed, the assembly constants
+ *   must also be changed
+ */
 struct thread_info {
-	struct pcb_struct	pcb;		/* palcode state */
-
-	struct task_struct	*task;		/* main task structure */
-	unsigned int		flags;		/* low level flags */
-	unsigned int		ieee_state;	/* see fpu.h */
-
-	unsigned		cpu;		/* current CPU */
-	int			preempt_count; /* 0 => preemptable, <0 => BUG */
-	unsigned int		status;		/* thread-synchronous flags */
-
-	int bpt_nsaved;
-	unsigned long bpt_addr[2];		/* breakpoint handling  */
-	unsigned int bpt_insn[2];
+	unsigned long flags;		/* low level flags */
+	int preempt_count;		/* 0 => preemptable, <0 => BUG */
+	struct task_struct *task;	/* main task structure */
+	__u32 cpu;			/* current CPU */
+	unsigned long thr_ptr;		/* TLS ptr */
 };
 
 /*
- * Macros/functions for gaining access to the thread information structure.
+ * macros/functions for gaining access to the thread information structure
+ *
+ * preempt_count needs to be 1 initially, until the scheduler is functional.
  */
 #define INIT_THREAD_INFO(tsk)			\
 {						\
-	.task		= &tsk,			\
-	.preempt_count	= INIT_PREEMPT_COUNT,	\
+	.task       = &tsk,			\
+	.flags      = 0,			\
+	.cpu        = 0,			\
+	.preempt_count  = INIT_PREEMPT_COUNT,	\
 }
 
-/* How to get the thread information struct from C.  */
-register struct thread_info *__current_thread_info __asm__("$8");
-#define current_thread_info()  __current_thread_info
+static inline __attribute_const__ struct thread_info *current_thread_info(void)
+{
+	register unsigned long sp asm("sp");
+	return (struct thread_info *)(sp & ~(THREAD_SIZE - 1));
+}
 
-#endif /* __ASSEMBLY__ */
-
-/* Thread information allocation.  */
-#define THREAD_SIZE_ORDER 1
-#define THREAD_SIZE (2*PAGE_SIZE)
+#endif /* !__ASSEMBLY__ */
 
 /*
- * Thread information flags:
- * - these are process state flags and used from assembly
- * - pending work-to-be-done flags come first and must be assigned to be
- *   within bits 0 to 7 to fit in and immediate operand.
- *
- * TIF_SYSCALL_TRACE is known to be 0 via blbs.
+ * thread information flags
+ * - these are process state flags that various assembly files may need to
+ *   access
+ * - pending work-to-be-done flags are in LSW
+ * - other flags in MSW
  */
-#define TIF_SYSCALL_TRACE	0	/* syscall trace active */
-#define TIF_NOTIFY_RESUME	1	/* callback before returning to user */
+#define TIF_RESTORE_SIGMASK	0	/* restore sig mask in do_signal() */
+#define TIF_NOTIFY_RESUME	1	/* resumption notification requested */
 #define TIF_SIGPENDING		2	/* signal pending */
 #define TIF_NEED_RESCHED	3	/* rescheduling necessary */
-#define TIF_SYSCALL_AUDIT	4	/* syscall audit active */
+#define TIF_SYSCALL_AUDIT	4	/* syscall auditing active */
 #define TIF_NOTIFY_SIGNAL	5	/* signal notifications exist */
-#define TIF_DIE_IF_KERNEL	9	/* dik recursion lock */
-#define TIF_MEMDIE		13	/* is terminating due to OOM killer */
-#define TIF_POLLING_NRFLAG	14	/* idle is polling for TIF_NEED_RESCHED */
+#define TIF_SYSCALL_TRACE	15	/* syscall trace active */
+/* true if poll_idle() is polling TIF_NEED_RESCHED */
+#define TIF_MEMDIE		16
+#define TIF_SYSCALL_TRACEPOINT	17	/* syscall tracepoint instrumentation */
 
 #define _TIF_SYSCALL_TRACE	(1<<TIF_SYSCALL_TRACE)
+#define _TIF_NOTIFY_RESUME	(1<<TIF_NOTIFY_RESUME)
 #define _TIF_SIGPENDING		(1<<TIF_SIGPENDING)
 #define _TIF_NEED_RESCHED	(1<<TIF_NEED_RESCHED)
-#define _TIF_NOTIFY_RESUME	(1<<TIF_NOTIFY_RESUME)
 #define _TIF_SYSCALL_AUDIT	(1<<TIF_SYSCALL_AUDIT)
 #define _TIF_NOTIFY_SIGNAL	(1<<TIF_NOTIFY_SIGNAL)
-#define _TIF_POLLING_NRFLAG	(1<<TIF_POLLING_NRFLAG)
+#define _TIF_MEMDIE		(1<<TIF_MEMDIE)
+#define _TIF_SYSCALL_TRACEPOINT	(1<<TIF_SYSCALL_TRACEPOINT)
 
-/* Work to do on interrupt/exception return.  */
-#define _TIF_WORK_MASK		(_TIF_SIGPENDING | _TIF_NEED_RESCHED | \
+/* work to do on interrupt/exception return */
+#define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
 				 _TIF_NOTIFY_RESUME | _TIF_NOTIFY_SIGNAL)
 
-/* Work to do on any return to userspace.  */
-#define _TIF_ALLWORK_MASK	(_TIF_WORK_MASK		\
-				 | _TIF_SYSCALL_TRACE)
+#define _TIF_SYSCALL_WORK	(_TIF_SYSCALL_TRACE | _TIF_SYSCALL_TRACEPOINT)
 
-#define TS_UAC_NOPRINT		0x0001	/* ! Preserve the following three */
-#define TS_UAC_NOFIX		0x0002	/* ! flags as they match          */
-#define TS_UAC_SIGBUS		0x0004	/* ! userspace part of 'osf_sysinfo' */
+/*
+ * _TIF_ALLWORK_MASK includes SYSCALL_TRACE, but we don't need it.
+ * SYSCALL_TRACE is anyway separately/unconditionally tested right after a
+ * syscall, so all that remains to be tested is _TIF_WORK_MASK
+ */
 
-#define SET_UNALIGN_CTL(task,value)	({				\
-	__u32 status = task_thread_info(task)->status & ~UAC_BITMASK;	\
-	if (value & PR_UNALIGN_NOPRINT)					\
-		status |= TS_UAC_NOPRINT;				\
-	if (value & PR_UNALIGN_SIGBUS)					\
-		status |= TS_UAC_SIGBUS;				\
-	if (value & 4)	/* alpha-specific */				\
-		status |= TS_UAC_NOFIX;					\
-	task_thread_info(task)->status = status;			\
-	0; })
-
-#define GET_UNALIGN_CTL(task,value)	({				\
-	__u32 status = task_thread_info(task)->status & ~UAC_BITMASK;	\
-	__u32 res = 0;							\
-	if (status & TS_UAC_NOPRINT)					\
-		res |= PR_UNALIGN_NOPRINT;				\
-	if (status & TS_UAC_SIGBUS)					\
-		res |= PR_UNALIGN_SIGBUS;				\
-	if (status & TS_UAC_NOFIX)					\
-		res |= 4;						\
-	put_user(res, (int __user *)(value));				\
-	})
-
-#endif /* __KERNEL__ */
-#endif /* _ALPHA_THREAD_INFO_H */
+#endif /* _ASM_THREAD_INFO_H */

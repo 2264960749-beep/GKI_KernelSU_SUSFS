@@ -1,97 +1,139 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-#ifndef _ALPHA_PAGE_H
-#define _ALPHA_PAGE_H
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
+ */
+#ifndef __ASM_ARC_PAGE_H
+#define __ASM_ARC_PAGE_H
 
-#include <linux/const.h>
-#include <asm/pal.h>
+#include <uapi/asm/page.h>
 
-/* PAGE_SHIFT determines the page size */
-#define PAGE_SHIFT	13
-#define PAGE_SIZE	(_AC(1,UL) << PAGE_SHIFT)
-#define PAGE_MASK	(~(PAGE_SIZE-1))
+#ifdef CONFIG_ARC_HAS_PAE40
+
+#define MAX_POSSIBLE_PHYSMEM_BITS	40
+#define PAGE_MASK_PHYS			(0xff00000000ull | PAGE_MASK)
+
+#else /* CONFIG_ARC_HAS_PAE40 */
+
+#define MAX_POSSIBLE_PHYSMEM_BITS	32
+#define PAGE_MASK_PHYS			PAGE_MASK
+
+#endif /* CONFIG_ARC_HAS_PAE40 */
 
 #ifndef __ASSEMBLY__
 
-#define STRICT_MM_TYPECHECKS
-
-extern void clear_page(void *page);
-#define clear_user_page(page, vaddr, pg)	clear_page(page)
-
-#define alloc_zeroed_user_highpage_movable(vma, vaddr) \
-	alloc_page_vma(GFP_HIGHUSER_MOVABLE | __GFP_ZERO, vma, vaddr)
-#define __HAVE_ARCH_ALLOC_ZEROED_USER_HIGHPAGE_MOVABLE
-
-extern void copy_page(void * _to, void * _from);
+#define clear_page(paddr)		memset((paddr), 0, PAGE_SIZE)
 #define copy_user_page(to, from, vaddr, pg)	copy_page(to, from)
+#define copy_page(to, from)		memcpy((to), (from), PAGE_SIZE)
 
-#ifdef STRICT_MM_TYPECHECKS
-/*
- * These are used to make use of C type-checking..
- */
-typedef struct { unsigned long pte; } pte_t;
-typedef struct { unsigned long pmd; } pmd_t;
-typedef struct { unsigned long pgd; } pgd_t;
-typedef struct { unsigned long pgprot; } pgprot_t;
+struct vm_area_struct;
+struct page;
+
+#define __HAVE_ARCH_COPY_USER_HIGHPAGE
+
+void copy_user_highpage(struct page *to, struct page *from,
+			unsigned long u_vaddr, struct vm_area_struct *vma);
+void clear_user_page(void *to, unsigned long u_vaddr, struct page *page);
+
+typedef struct {
+	unsigned long pgd;
+} pgd_t;
+
+#define pgd_val(x)	((x).pgd)
+#define __pgd(x)	((pgd_t) { (x) })
+
+#if CONFIG_PGTABLE_LEVELS > 3
+
+typedef struct {
+	unsigned long pud;
+} pud_t;
+
+#define pud_val(x)      	((x).pud)
+#define __pud(x)        	((pud_t) { (x) })
+
+#endif
+
+#if CONFIG_PGTABLE_LEVELS > 2
+
+typedef struct {
+	unsigned long pmd;
+} pmd_t;
+
+#define pmd_val(x)	((x).pmd)
+#define __pmd(x)	((pmd_t) { (x) })
+
+#endif
+
+typedef struct {
+#ifdef CONFIG_ARC_HAS_PAE40
+	unsigned long long pte;
+#else
+	unsigned long pte;
+#endif
+} pte_t;
 
 #define pte_val(x)	((x).pte)
-#define pmd_val(x)	((x).pmd)
-#define pgd_val(x)	((x).pgd)
+#define __pte(x)	((pte_t) { (x) })
+
+typedef struct {
+	unsigned long pgprot;
+} pgprot_t;
+
 #define pgprot_val(x)	((x).pgprot)
-
-#define __pte(x)	((pte_t) { (x) } )
-#define __pmd(x)	((pmd_t) { (x) } )
-#define __pgd(x)	((pgd_t) { (x) } )
-#define __pgprot(x)	((pgprot_t) { (x) } )
-
-#else
-/*
- * .. while these make it easier on the compiler
- */
-typedef unsigned long pte_t;
-typedef unsigned long pmd_t;
-typedef unsigned long pgd_t;
-typedef unsigned long pgprot_t;
-
-#define pte_val(x)	(x)
-#define pmd_val(x)	(x)
-#define pgd_val(x)	(x)
-#define pgprot_val(x)	(x)
-
-#define __pte(x)	(x)
-#define __pgd(x)	(x)
-#define __pgprot(x)	(x)
-
-#endif /* STRICT_MM_TYPECHECKS */
+#define __pgprot(x)	((pgprot_t) { (x) })
+#define pte_pgprot(x)	__pgprot(pte_val(x))
 
 typedef struct page *pgtable_t;
 
-#ifdef USE_48_BIT_KSEG
-#define PAGE_OFFSET		0xffff800000000000UL
-#else
-#define PAGE_OFFSET		0xfffffc0000000000UL
-#endif
+/*
+ * Use virt_to_pfn with caution:
+ * If used in pte or paddr related macros, it could cause truncation
+ * in PAE40 builds
+ * As a rule of thumb, only use it in helpers starting with virt_
+ * You have been warned !
+ */
+#define virt_to_pfn(kaddr)	(__pa(kaddr) >> PAGE_SHIFT)
 
-#else
+/*
+ * When HIGHMEM is enabled we have holes in the memory map so we need
+ * pfn_valid() that takes into account the actual extents of the physical
+ * memory
+ */
+#ifdef CONFIG_HIGHMEM
 
-#ifdef USE_48_BIT_KSEG
-#define PAGE_OFFSET		0xffff800000000000
-#else
-#define PAGE_OFFSET		0xfffffc0000000000
-#endif
+extern unsigned long arch_pfn_offset;
+#define ARCH_PFN_OFFSET		arch_pfn_offset
+
+extern int pfn_valid(unsigned long pfn);
+#define pfn_valid		pfn_valid
+
+#else /* CONFIG_HIGHMEM */
+
+#define ARCH_PFN_OFFSET		virt_to_pfn(CONFIG_LINUX_RAM_BASE)
+#define pfn_valid(pfn)		(((pfn) - ARCH_PFN_OFFSET) < max_mapnr)
+
+#endif /* CONFIG_HIGHMEM */
+
+/*
+ * __pa, __va, virt_to_page (ALERT: deprecated, don't use them)
+ *
+ * These macros have historically been misnamed
+ * virt here means link-address/program-address as embedded in object code.
+ * And for ARC, link-addr = physical address
+ */
+#define __pa(vaddr)  		((unsigned long)(vaddr))
+#define __va(paddr)  		((void *)((unsigned long)(paddr)))
+
+#define virt_to_page(kaddr)	pfn_to_page(virt_to_pfn(kaddr))
+#define virt_addr_valid(kaddr)  pfn_valid(virt_to_pfn(kaddr))
+
+/* Default Permissions for stack/heaps pages (Non Executable) */
+#define VM_DATA_DEFAULT_FLAGS	VM_DATA_FLAGS_NON_EXEC
+
+#define WANT_PAGE_VIRTUAL   1
+
+#include <asm-generic/memory_model.h>   /* page_to_pfn, pfn_to_page */
+#include <asm-generic/getorder.h>
 
 #endif /* !__ASSEMBLY__ */
 
-#define __pa(x)			((unsigned long) (x) - PAGE_OFFSET)
-#define __va(x)			((void *)((unsigned long) (x) + PAGE_OFFSET))
-
-#define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
-#define virt_addr_valid(kaddr)	pfn_valid((__pa(kaddr) >> PAGE_SHIFT))
-
-#ifdef CONFIG_FLATMEM
-#define pfn_valid(pfn)		((pfn) < max_mapnr)
-#endif /* CONFIG_FLATMEM */
-
-#include <asm-generic/memory_model.h>
-#include <asm-generic/getorder.h>
-
-#endif /* _ALPHA_PAGE_H */
+#endif
