@@ -32,7 +32,6 @@ jobs:
           cd ..
 
       - name: 发布
-        if: true
         uses: softprops/action-gh-release@v1
         with:
           files: kernel.zip
