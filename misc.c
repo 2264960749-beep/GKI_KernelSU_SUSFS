@@ -15,160 +15,152 @@
  *  only.  This way all non constant variables will end up in the bss segment,
  *  which should point to addresses in RAM and cleared to 0 on start.
  *  This allows for a much quicker boot time.
- *
- * Modified for Alpha, from the ARM version, by Jay Estabrook 2003.
  */
 
-#include <linux/kernel.h>
-#include <linux/slab.h>
+unsigned int __machine_arch_type;
 
-#include <linux/uaccess.h>
+#include <linux/compiler.h>	/* for inline */
+#include <linux/types.h>
+#include <linux/linkage.h>
+#include "misc.h"
+#ifdef CONFIG_ARCH_EP93XX
+#include "misc-ep93xx.h"
+#endif
 
-#define memzero(s,n)	memset ((s),0,(n))
-#define puts		srm_printk
-extern long srm_printk(const char *, ...)
-     __attribute__ ((format (printf, 1, 2)));
+static void putstr(const char *ptr);
+
+#include CONFIG_UNCOMPRESS_INCLUDE
+
+#ifdef CONFIG_DEBUG_ICEDCC
+
+#if defined(CONFIG_CPU_V6) || defined(CONFIG_CPU_V6K) || defined(CONFIG_CPU_V7)
+
+static void icedcc_putc(int ch)
+{
+	int status, i = 0x4000000;
+
+	do {
+		if (--i < 0)
+			return;
+
+		asm volatile ("mrc p14, 0, %0, c0, c1, 0" : "=r" (status));
+	} while (status & (1 << 29));
+
+	asm("mcr p14, 0, %0, c0, c5, 0" : : "r" (ch));
+}
+
+
+#elif defined(CONFIG_CPU_XSCALE)
+
+static void icedcc_putc(int ch)
+{
+	int status, i = 0x4000000;
+
+	do {
+		if (--i < 0)
+			return;
+
+		asm volatile ("mrc p14, 0, %0, c14, c0, 0" : "=r" (status));
+	} while (status & (1 << 28));
+
+	asm("mcr p14, 0, %0, c8, c0, 0" : : "r" (ch));
+}
+
+#else
+
+static void icedcc_putc(int ch)
+{
+	int status, i = 0x4000000;
+
+	do {
+		if (--i < 0)
+			return;
+
+		asm volatile ("mrc p14, 0, %0, c0, c0, 0" : "=r" (status));
+	} while (status & 2);
+
+	asm("mcr p14, 0, %0, c1, c0, 0" : : "r" (ch));
+}
+
+#endif
+
+#define putc(ch)	icedcc_putc(ch)
+#endif
+
+static void putstr(const char *ptr)
+{
+	char c;
+
+	while ((c = *ptr++) != '\0') {
+		if (c == '\n')
+			putc('\r');
+		putc(c);
+	}
+
+	flush();
+}
 
 /*
  * gzip declarations
  */
-#define OF(args)  args
-#define STATIC static
+extern char input_data[];
+extern char input_data_end[];
 
-typedef unsigned char  uch;
-typedef unsigned short ush;
-typedef unsigned long  ulg;
+unsigned char *output_data;
 
-#define WSIZE 0x8000		/* Window size must be at least 32k, */
-				/* and a power of two */
+unsigned long free_mem_ptr;
+unsigned long free_mem_end_ptr;
 
-static uch *inbuf;		/* input buffer */
-static uch *window;		/* Sliding window buffer */
-
-static unsigned insize;		/* valid bytes in inbuf */
-static unsigned inptr;		/* index of next byte to be processed in inbuf */
-static unsigned outcnt;		/* bytes in output buffer */
-
-/* gzip flag byte */
-#define ASCII_FLAG   0x01 /* bit 0 set: file probably ascii text */
-#define CONTINUATION 0x02 /* bit 1 set: continuation of multi-part gzip file */
-#define EXTRA_FIELD  0x04 /* bit 2 set: extra field present */
-#define ORIG_NAME    0x08 /* bit 3 set: original file name present */
-#define COMMENT      0x10 /* bit 4 set: file comment present */
-#define ENCRYPTED    0x20 /* bit 5 set: file is encrypted */
-#define RESERVED     0xC0 /* bit 6,7:   reserved */
-
-#define get_byte()  (inptr < insize ? inbuf[inptr++] : fill_inbuf())
-
-/* Diagnostic functions */
-#ifdef DEBUG
-#  define Assert(cond,msg) {if(!(cond)) error(msg);}
-#  define Trace(x) fprintf x
-#  define Tracev(x) {if (verbose) fprintf x ;}
-#  define Tracevv(x) {if (verbose>1) fprintf x ;}
-#  define Tracec(c,x) {if (verbose && (c)) fprintf x ;}
-#  define Tracecv(c,x) {if (verbose>1 && (c)) fprintf x ;}
-#else
-#  define Assert(cond,msg)
-#  define Trace(x)
-#  define Tracev(x)
-#  define Tracevv(x)
-#  define Tracec(c,x)
-#  define Tracecv(c,x)
+#ifndef arch_error
+#define arch_error(x)
 #endif
 
-static int  fill_inbuf(void);
-static void flush_window(void);
-static void error(char *m);
-
-static char *input_data;
-static int  input_data_size;
-
-static uch *output_data;
-static ulg output_ptr;
-static ulg bytes_out;
-
-static void error(char *m);
-static void gzip_mark(void **);
-static void gzip_release(void **);
-
-extern int end;
-static ulg free_mem_ptr;
-static ulg free_mem_end_ptr;
-
-#define HEAP_SIZE 0x3000
-
-#include "../../../lib/inflate.c"
-
-/* ===========================================================================
- * Fill the input buffer. This is called only when the buffer is empty
- * and at least one byte is really needed.
- */
-int fill_inbuf(void)
+void error(char *x)
 {
-	if (insize != 0)
-		error("ran out of input data");
+	arch_error(x);
 
-	inbuf = input_data;
-	insize = input_data_size;
-
-	inptr = 1;
-	return inbuf[0];
-}
-
-/* ===========================================================================
- * Write the output window window[0..outcnt-1] and update crc and bytes_out.
- * (Used for the decompressed data only.)
- */
-void flush_window(void)
-{
-	ulg c = crc;
-	unsigned n;
-	uch *in, *out, ch;
-
-	in = window;
-	out = &output_data[output_ptr];
-	for (n = 0; n < outcnt; n++) {
-		ch = *out++ = *in++;
-		c = crc_32_tab[((int)c ^ ch) & 0xff] ^ (c >> 8);
-	}
-	crc = c;
-	bytes_out += (ulg)outcnt;
-	output_ptr += (ulg)outcnt;
-	outcnt = 0;
-/*	puts("."); */
-}
-
-static void error(char *x)
-{
-	puts("\n\n");
-	puts(x);
-	puts("\n\n -- System halted");
+	putstr("\n\n");
+	putstr(x);
+	putstr("\n\n -- System halted");
 
 	while(1);	/* Halt */
 }
 
-unsigned int
-decompress_kernel(void *output_start,
-		  void *input_start,
-		  size_t ksize,
-		  size_t kzsize)
+asmlinkage void __div0(void)
 {
-	output_data		= (uch *)output_start;
-	input_data		= (uch *)input_start;
-	input_data_size		= kzsize; /* use compressed size */
+	error("Attempting division by 0!");
+}
 
-	/* FIXME FIXME FIXME */
-	free_mem_ptr		= (ulg)output_start + ksize;
-	free_mem_end_ptr	= (ulg)output_start + ksize + 0x200000;
-	/* FIXME FIXME FIXME */
+extern int do_decompress(u8 *input, int len, u8 *output, void (*error)(char *x));
 
-	/* put in temp area to reduce initial footprint */
-	window = malloc(WSIZE);
 
-	makecrc();
-/*	puts("Uncompressing Linux..."); */
-	gunzip();
-/*	puts(" done, booting the kernel.\n"); */
-	return output_ptr;
+void
+decompress_kernel(unsigned long output_start, unsigned long free_mem_ptr_p,
+		unsigned long free_mem_ptr_end_p,
+		int arch_id)
+{
+	int ret;
+
+	output_data		= (unsigned char *)output_start;
+	free_mem_ptr		= free_mem_ptr_p;
+	free_mem_end_ptr	= free_mem_ptr_end_p;
+	__machine_arch_type	= arch_id;
+
+#ifdef CONFIG_ARCH_EP93XX
+	ep93xx_decomp_setup();
+#endif
+	arch_decomp_setup();
+
+	putstr("Uncompressing Linux...");
+	ret = do_decompress(input_data, input_data_end - input_data,
+			    output_data, error);
+	if (ret)
+		error("decompressor returned an error");
+	else
+		putstr(" done, booting the kernel.\n");
+}
+
+void fortify_panic(const char *name)
+{
+	error("detected buffer overflow");
 }
