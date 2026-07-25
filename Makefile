@@ -1,61 +1,64 @@
-# SPDX-License-Identifier: GPL-2.0
 #
-# Makefile for alpha-specific library files..
+# alpha/Makefile
+#
+# This file is subject to the terms and conditions of the GNU General Public
+# License.  See the file "COPYING" in the main directory of this archive
+# for more details.
+#
+# Copyright (C) 1994 by Linus Torvalds
 #
 
-asflags-y := $(KBUILD_CFLAGS)
-ccflags-y := -Werror
+NM := $(NM) -B
 
-# Many of these routines have implementations tuned for ev6.
-# Choose them iff we're targeting ev6 specifically.
-ev6-$(CONFIG_ALPHA_EV6) := ev6-
+LDFLAGS_vmlinux	:= -static -N #-relax
+CHECKFLAGS	+= -D__alpha__
+cflags-y	:= -pipe -mno-fp-regs -ffixed-8
+cflags-y	+= $(call cc-option, -fno-jump-tables)
 
-# Several make use of the cttz instruction introduced in ev67.
-ev67-$(CONFIG_ALPHA_EV67) := ev67-
+cpuflags-$(CONFIG_ALPHA_EV4)		:= -mcpu=ev4
+cpuflags-$(CONFIG_ALPHA_EV5)		:= -mcpu=ev5
+cpuflags-$(CONFIG_ALPHA_EV56)		:= -mcpu=ev56
+cpuflags-$(CONFIG_ALPHA_POLARIS)	:= -mcpu=pca56
+cpuflags-$(CONFIG_ALPHA_SX164)		:= -mcpu=pca56
+cpuflags-$(CONFIG_ALPHA_EV6)		:= -mcpu=ev6
+cpuflags-$(CONFIG_ALPHA_EV67)		:= -mcpu=ev67
+# If GENERIC, make sure to turn off any instruction set extensions that
+# the host compiler might have on by default.  Given that EV4 and EV5
+# have the same instruction set, prefer EV5 because an EV5 schedule is
+# more likely to keep an EV4 processor busy than vice-versa.
+cpuflags-$(CONFIG_ALPHA_GENERIC)	:= -mcpu=ev5
 
-lib-y =	__divqu.o __remqu.o __divlu.o __remlu.o \
-	udiv-qrnnd.o \
-	udelay.o \
-	$(ev6-y)memset.o \
-	$(ev6-y)memcpy.o \
-	memmove.o \
-	checksum.o \
-	csum_partial_copy.o \
-	$(ev67-y)strlen.o \
-	stycpy.o \
-	styncpy.o \
-	$(ev67-y)strchr.o \
-	$(ev67-y)strrchr.o \
-	$(ev6-y)memchr.o \
-	$(ev6-y)copy_user.o \
-	$(ev6-y)clear_user.o \
-	$(ev6-y)csum_ipv6_magic.o \
-	$(ev6-y)clear_page.o \
-	$(ev6-y)copy_page.o \
-	fpreg.o \
-	callback_srm.o srm_puts.o srm_printk.o \
-	fls.o
+cflags-y				+= $(cpuflags-y)
 
-# The division routines are built from single source, with different defines.
-AFLAGS___divqu.o = -DDIV
-AFLAGS___remqu.o =       -DREM
-AFLAGS___divlu.o = -DDIV       -DINTSIZE
-AFLAGS___remlu.o =       -DREM -DINTSIZE
 
-$(addprefix $(obj)/,__divqu.o __remqu.o __divlu.o __remlu.o): \
-						$(src)/$(ev6-y)divide.S FORCE
-	$(call if_changed_rule,as_o_S)
+# For TSUNAMI, we must have the assembler not emulate our instructions.
+# The same is true for IRONGATE, POLARIS, PYXIS.
+# BWX is most important, but we don't really want any emulation ever.
+KBUILD_CFLAGS += $(cflags-y) -Wa,-mev6
 
-# There are direct branches between {str*cpy,str*cat} and stx*cpy.
-# Ensure the branches are within range by merging these objects.
+libs-y				+= arch/alpha/lib/
 
-LDFLAGS_stycpy.o := -r
-LDFLAGS_styncpy.o := -r
+# export what is needed by arch/alpha/boot/Makefile
+LIBS_Y := $(patsubst %/, %/lib.a, $(libs-y))
+export LIBS_Y
 
-$(obj)/stycpy.o: $(obj)/strcpy.o $(obj)/$(ev67-y)strcat.o \
-		 $(obj)/$(ev6-y)stxcpy.o FORCE
-	$(call if_changed,ld)
+boot := arch/alpha/boot
 
-$(obj)/styncpy.o: $(obj)/strncpy.o $(obj)/$(ev67-y)strncat.o \
-		 $(obj)/$(ev6-y)stxncpy.o FORCE
-	$(call if_changed,ld)
+#Default target when executing make with no arguments
+all boot: $(boot)/vmlinux.gz
+
+$(boot)/vmlinux.gz: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $@
+
+bootimage bootpfile bootpzfile: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
+
+archheaders:
+	$(Q)$(MAKE) $(build)=arch/alpha/kernel/syscalls all
+
+define archhelp
+  echo '* boot		- Compressed kernel image (arch/alpha/boot/vmlinux.gz)'
+  echo '  bootimage	- SRM bootable image (arch/alpha/boot/bootimage)'
+  echo '  bootpfile	- BOOTP bootable image (arch/alpha/boot/bootpfile)'
+  echo '  bootpzfile	- compressed kernel BOOTP image (arch/alpha/boot/bootpzfile)'
+endef
