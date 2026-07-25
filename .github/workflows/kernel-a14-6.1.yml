@@ -7,24 +7,20 @@ jobs:
   build-kernel:
     runs-on: ubuntu-latest
     steps:
-      - name: 拉取仓库
+      - name: 拉取仓库源码
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      # 自动把嵌套文件夹内所有内核文件移动到仓库根目录
-      - name: 解压嵌套内核目录
-        run: |
-          mv android_kernel_oneplus_mt6989-oneplus-mt6989_v_15.0.2_ace5_race/* ./
-          rm -rf android_kernel_oneplus_mt6989-oneplus-mt6989_v_15.0.2_ace5_race
 
       - name: 安装编译依赖
         run: |
           sudo apt update -y
           sudo apt install -y build-essential libssl-dev libelf-dev bison flex zip unzip lld llvm python3
 
-      - name: 内核配置&编译
+      # 直接进入现有嵌套目录编译，不移动文件
+      - name: 内核配置编译
         run: |
+          cd oneplus/mt6989_v_15.0.2_ace5_race
           export ARCH=arm64
           make oplus_plf110_defconfig
           make -j$(nproc)
@@ -32,12 +28,12 @@ jobs:
       - name: 打包刷机包
         run: |
           mkdir anykernel
-          cp arch/arm64/boot/Image anykernel/
+          cp oneplus/mt6989_v_15.0.2_ace5_race/arch/arm64/boot/Image anykernel/
           cd anykernel
           zip -r ../kernel.zip Image
           cd ..
 
-      - name: 发布刷机包到Releases
+      - name: 发布刷机包
         uses: softprops/action-gh-release@v1
         with:
           files: kernel.zip
