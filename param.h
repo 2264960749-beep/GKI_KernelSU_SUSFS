@@ -1,12 +1,15 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-#ifndef _ASM_ALPHA_PARAM_H
-#define _ASM_ALPHA_PARAM_H
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+#ifndef _UAPI_ASM_ALPHA_PARAM_H
+#define _UAPI_ASM_ALPHA_PARAM_H
 
-#include <uapi/asm/param.h>
+#define HZ		1024
 
-# undef HZ
-# define HZ		CONFIG_HZ
-# define USER_HZ	1024
-# define CLOCKS_PER_SEC	USER_HZ	/* frequency at which times() counts */
+#define EXEC_PAGESIZE	8192
 
-#endif /* _ASM_ALPHA_PARAM_H */
+#ifndef NOGROUP
+#define NOGROUP		(-1)
+#endif
+
+#define MAXHOSTNAMELEN	64	/* max length of hostname */
+
+#endif /* _UAPI_ASM_ALPHA_PARAM_H */

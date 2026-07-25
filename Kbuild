@@ -1,6 +1,2 @@
 # SPDX-License-Identifier: GPL-2.0
-
-generated-y += syscall_table.h
-generic-y += export.h
-generic-y += kvm_para.h
-generic-y += mcs_spinlock.h
+generated-y += unistd_32.h
