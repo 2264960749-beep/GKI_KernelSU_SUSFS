@@ -1,37 +1,24 @@
 name: Android 14 6.1
 permissions:
   contents: write
-  actions: write
 on:
   workflow_dispatch:
-  workflow_call:
-    inputs:
-      make_release:
-        required: true
-        type: boolean
-        default: true
 jobs:
   build-kernel:
     runs-on: ubuntu-latest
     steps:
-      - name: 拉取工作流
+      - name: 拉取仓库
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-
-      # 更换稳定完整MT6989内核分支，原分支文件缺失
-      - name: 拉取天玑MT6989通用内核
-        run: |
-          git clone -b mt6989-android14-6.1 https://github.com/OnePlusOSS/android_kernel_oneplus_mt6989 tmp_kernel
-          mv tmp_kernel/* ./
-          rm -rf tmp_kernel
+          submodules: true
 
       - name: 安装编译依赖
         run: |
-          sudo apt update -y
-          sudo apt install -y build-essential libssl-dev libelf-dev bison flex zip unzip lld llvm python3
+          sudo apt update
+          sudo apt install -y build-essential libssl-dev libelf-dev bison flex zip unzip llvm
 
-      - name: 生成基础默认配置
+      - name: 基础内核配置
         run: |
           export ARCH=arm64
           make defconfig
@@ -42,18 +29,15 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           make -j$(nproc)
 
-      - name: 打包AnyKernel3
+      - name: 打包刷机包
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3 anykernel --depth=1
-          cp arch/arm64/boot/Image anykernel/Image
+          mkdir anykernel
+          cp arch/arm64/boot/Image anykernel/
           cd anykernel
-          zip -r ../GKI-MT6989.zip *
+          zip -r ../kernel.zip Image
           cd ..
 
-      - name: 发布安装包
-        if: ${{ inputs.make_release == true }}
+      - name: 上传成品
         uses: softprops/action-gh-release@v1
         with:
-          files: GKI-MT6989.zip
-          tag_name: MT6989-A14-6.1-${{ github.sha }}
-          generate_release_notes: true
+          files: kernel.zip
