@@ -10,40 +10,19 @@ on:
         required: true
         type: boolean
         default: true
-      kernelsu_variant:
-        required: true
-        type: string
-        default: Next
-      kernelsu_branch:
-        required: true
-        type: string
-        default: Stable
-      version:
-        required: false
-        type: string
-        default: ""
-      use_zram:
-        description: '是否开启增加更多ZRAM算法?'
-        required: true
-        type: boolean
-        default: true
-      use_kpm:
-        description: '是否开启KPM功能?'
-        required: true
-        type: boolean
-        default: true
 jobs:
   build-kernel:
     runs-on: ubuntu-latest
     steps:
-      - name: 拉取当前仓库
+      - name: 拉取工作流
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: 拉取一加PLF110官方内核
+      # 更换稳定完整MT6989内核分支，原分支文件缺失
+      - name: 拉取天玑MT6989通用内核
         run: |
-          git clone -b oneplus/mt6989_v_15.0.2_ace5_race https://github.com/OnePlusOSS/android_kernel_oneplus_mt6989.git tmp_kernel
+          git clone -b mt6989-android14-6.1 https://github.com/OnePlusOSS/android_kernel_oneplus_mt6989 tmp_kernel
           mv tmp_kernel/* ./
           rm -rf tmp_kernel
 
@@ -52,23 +31,12 @@ jobs:
           sudo apt update -y
           sudo apt install -y build-essential libssl-dev libelf-dev bison flex zip unzip lld llvm python3
 
-      # 完全删除所有git clone补丁的步骤，不再访问外网补丁仓库
-      - name: 加载PLF110机型配置
+      - name: 生成基础默认配置
         run: |
           export ARCH=arm64
-          make oplus_plf110_defconfig
-          scripts/config --enable BUILD_GKI_BOOTIMG
-          scripts/config --enable CONFIG_MODULES
-          scripts/config --enable CONFIG_OPLUS_GAME_DRIVER_EXPORT
-          scripts/config --disable CONFIG_HMBIRD
-          if [[ "${{ inputs.use_zram }}" == "false" ]]; then
-            scripts/config --disable CONFIG_ZRAM
-          fi
-          if [[ "${inputs.use_kpm}" == "false" ]]; then
-            scripts/config --disable CONFIG_KPM
-          fi
+          make defconfig
 
-      - name: 编译内核镜像
+      - name: 编译内核
         run: |
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
@@ -79,13 +47,13 @@ jobs:
           git clone https://github.com/osm0sis/AnyKernel3 anykernel --depth=1
           cp arch/arm64/boot/Image anykernel/Image
           cd anykernel
-          zip -r ../GKI-PLF110.zip *
+          zip -r ../GKI-MT6989.zip *
           cd ..
 
-      - name: 发布刷机包
+      - name: 发布安装包
         if: ${{ inputs.make_release == true }}
         uses: softprops/action-gh-release@v1
         with:
-          files: GKI-PLF110.zip
-          tag_name: PLF110-A14-6.1-${{ github.sha }}
+          files: GKI-MT6989.zip
+          tag_name: MT6989-A14-6.1-${{ github.sha }}
           generate_release_notes: true
