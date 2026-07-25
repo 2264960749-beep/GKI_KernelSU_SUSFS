@@ -1,23 +1,44 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-#ifndef __BARRIER_H
-#define __BARRIER_H
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Copyright (C) 2014-15 Synopsys, Inc. (www.synopsys.com)
+ */
 
-#define mb()	__asm__ __volatile__("mb": : :"memory")
-#define rmb()	__asm__ __volatile__("mb": : :"memory")
-#define wmb()	__asm__ __volatile__("wmb": : :"memory")
+#ifndef __ASM_BARRIER_H
+#define __ASM_BARRIER_H
 
-#define __smp_load_acquire(p)						\
-({									\
-	compiletime_assert_atomic_type(*p);				\
-	__READ_ONCE(*p);						\
-})
+#ifdef CONFIG_ISA_ARCV2
 
-#ifdef CONFIG_SMP
-#define __ASM_SMP_MB	"\tmb\n"
+/*
+ * ARCv2 based HS38 cores are in-order issue, but still weakly ordered
+ * due to micro-arch buffering/queuing of load/store, cache hit vs. miss ...
+ *
+ * Explicit barrier provided by DMB instruction
+ *  - Operand supports fine grained load/store/load+store semantics
+ *  - Ensures that selected memory operation issued before it will complete
+ *    before any subsequent memory operation of same type
+ *  - DMB guarantees SMP as well as local barrier semantics
+ *    (asm-generic/barrier.h ensures sane smp_*mb if not defined here, i.e.
+ *    UP: barrier(), SMP: smp_*mb == *mb)
+ *  - DSYNC provides DMB+completion_of_cache_bpu_maintenance_ops hence not needed
+ *    in the general case. Plus it only provides full barrier.
+ */
+
+#define mb()	asm volatile("dmb 3\n" : : : "memory")
+#define rmb()	asm volatile("dmb 1\n" : : : "memory")
+#define wmb()	asm volatile("dmb 2\n" : : : "memory")
+
 #else
-#define __ASM_SMP_MB
+
+/*
+ * ARCompact based cores (ARC700) only have SYNC instruction which is super
+ * heavy weight as it flushes the pipeline as well.
+ * There are no real SMP implementations of such cores.
+ */
+
+#define mb()	asm volatile("sync\n" : : : "memory")
+
 #endif
 
 #include <asm-generic/barrier.h>
 
-#endif		/* __BARRIER_H */
+#endif

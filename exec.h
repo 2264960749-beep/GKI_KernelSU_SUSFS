@@ -3,9 +3,10 @@
  * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
  */
 
-#ifndef ASM_ARC_DMA_H
-#define ASM_ARC_DMA_H
+#ifndef __ASM_ARC_EXEC_H
+#define __ASM_ARC_EXEC_H
 
-#define MAX_DMA_ADDRESS 0xC0000000
+/* Align to 16b */
+#define arch_align_stack(p) ((unsigned long)(p) & ~0xf)
 
 #endif

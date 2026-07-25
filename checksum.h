@@ -1,74 +1,98 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-#ifndef _ALPHA_CHECKSUM_H
-#define _ALPHA_CHECKSUM_H
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
+ *
+ * Joern Rennecke  <joern.rennecke@embecosm.com>: Jan 2012
+ *  -Insn Scheduling improvements to csum core routines.
+ *      = csum_fold( ) largely derived from ARM version.
+ *      = ip_fast_cum( ) to have module scheduling
+ *  -gcc 4.4.x broke networking. Alias analysis needed to be primed.
+ *   worked around by adding memory clobber to ip_fast_csum( )
+ *
+ * vineetg: May 2010
+ *  -Rewrote ip_fast_cscum( ) and csum_fold( ) with fast inline asm
+ */
 
-#include <linux/in6.h>
+#ifndef _ASM_ARC_CHECKSUM_H
+#define _ASM_ARC_CHECKSUM_H
+
+/*
+ *	Fold a partial checksum
+ *
+ *  The 2 swords comprising the 32bit sum are added, any carry to 16th bit
+ *  added back and final sword result inverted.
+ */
+static inline __sum16 csum_fold(__wsum s)
+{
+	unsigned int r = s << 16 | s >> 16;	/* ror */
+	s = ~s;
+	s -= r;
+	return s >> 16;
+}
 
 /*
  *	This is a version of ip_compute_csum() optimized for IP headers,
  *	which always checksum on 4 octet boundaries.
  */
-extern __sum16 ip_fast_csum(const void *iph, unsigned int ihl);
-
-/*
- * computes the checksum of the TCP/UDP pseudo-header
- * returns a 16-bit checksum, already complemented
- */
-__sum16 csum_tcpudp_magic(__be32 saddr, __be32 daddr,
-			  __u32 len, __u8 proto, __wsum sum);
-
-__wsum csum_tcpudp_nofold(__be32 saddr, __be32 daddr,
-			  __u32 len, __u8 proto, __wsum sum);
-
-/*
- * computes the checksum of a memory block at buff, length len,
- * and adds in "sum" (32-bit)
- *
- * returns a 32-bit number suitable for feeding into itself
- * or csum_tcpudp_magic
- *
- * this function must be called with even lengths, except
- * for the last fragment, which may be odd
- *
- * it's best to have buff aligned on a 32-bit boundary
- */
-extern __wsum csum_partial(const void *buff, int len, __wsum sum);
-
-/*
- * the same as csum_partial, but copies from src while it
- * checksums
- *
- * here even more important to align src and dst on a 32-bit (or even
- * better 64-bit) boundary
- */
-#define _HAVE_ARCH_COPY_AND_CSUM_FROM_USER
-#define _HAVE_ARCH_CSUM_AND_COPY
-__wsum csum_and_copy_from_user(const void __user *src, void *dst, int len);
-
-__wsum csum_partial_copy_nocheck(const void *src, void *dst, int len);
-
-
-/*
- * this routine is used for miscellaneous IP-like checksums, mainly
- * in icmp.c
- */
-
-extern __sum16 ip_compute_csum(const void *buff, int len);
-
-/*
- *	Fold a partial checksum without adding pseudo headers
- */
-
-static inline __sum16 csum_fold(__wsum csum)
+static inline __sum16
+ip_fast_csum(const void *iph, unsigned int ihl)
 {
-	u32 sum = (__force u32)csum;
-	sum = (sum & 0xffff) + (sum >> 16);
-	sum = (sum & 0xffff) + (sum >> 16);
-	return (__force __sum16)~sum;
+	const void *ptr = iph;
+	unsigned int tmp, tmp2, sum;
+
+	__asm__(
+	"	ld.ab  %0, [%3, 4]		\n"
+	"	ld.ab  %2, [%3, 4]		\n"
+	"	sub    %1, %4, 2		\n"
+	"	lsr.f  lp_count, %1, 1		\n"
+	"	bcc    0f			\n"
+	"	add.f  %0, %0, %2		\n"
+	"	ld.ab  %2, [%3, 4]		\n"
+	"0:	lp     1f			\n"
+	"	ld.ab  %1, [%3, 4]		\n"
+	"	adc.f  %0, %0, %2		\n"
+	"	ld.ab  %2, [%3, 4]		\n"
+	"	adc.f  %0, %0, %1		\n"
+	"1:	adc.f  %0, %0, %2		\n"
+	"	add.cs %0,%0,1			\n"
+	: "=&r"(sum), "=r"(tmp), "=&r"(tmp2), "+&r" (ptr)
+	: "r"(ihl)
+	: "cc", "lp_count", "memory");
+
+	return csum_fold(sum);
 }
 
-#define _HAVE_ARCH_IPV6_CSUM
-extern __sum16 csum_ipv6_magic(const struct in6_addr *saddr,
-			       const struct in6_addr *daddr,
-			       __u32 len, __u8 proto, __wsum sum);
+/*
+ * TCP pseudo Header is 12 bytes:
+ * SA [4], DA [4], zeroes [1], Proto[1], TCP Seg(hdr+data) Len [2]
+ */
+static inline __wsum
+csum_tcpudp_nofold(__be32 saddr, __be32 daddr, __u32 len,
+		   __u8 proto, __wsum sum)
+{
+	__asm__ __volatile__(
+	"	add.f %0, %0, %1	\n"
+	"	adc.f %0, %0, %2	\n"
+	"	adc.f %0, %0, %3	\n"
+	"	adc.f %0, %0, %4	\n"
+	"	adc   %0, %0, 0		\n"
+	: "+&r"(sum)
+	: "r"(saddr), "r"(daddr),
+#ifdef CONFIG_CPU_BIG_ENDIAN
+	  "r"(len),
+#else
+	  "r"(len << 8),
 #endif
+	  "r"(htons(proto))
+	: "cc");
+
+	return sum;
+}
+
+#define csum_fold csum_fold
+#define ip_fast_csum ip_fast_csum
+#define csum_tcpudp_nofold csum_tcpudp_nofold
+
+#include <asm-generic/checksum.h>
+
+#endif /* _ASM_ARC_CHECKSUM_H */

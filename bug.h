@@ -1,25 +1,34 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-#ifndef _ALPHA_BUG_H
-#define _ALPHA_BUG_H
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
+ * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
+ */
 
-#include <linux/linkage.h>
+#ifndef _ASM_ARC_BUG_H
+#define _ASM_ARC_BUG_H
 
-#ifdef CONFIG_BUG
-#include <asm/pal.h>
+#ifndef __ASSEMBLY__
 
-/* ??? Would be nice to use .gprel32 here, but we can't be sure that the
-   function loaded the GP, so this could fail in modules.  */
-#define BUG()	do {							\
-	__asm__ __volatile__(						\
-		"call_pal %0  # bugchk\n\t"				\
-		".long %1\n\t.8byte %2"					\
-		: : "i"(PAL_bugchk), "i"(__LINE__), "i"(__FILE__));	\
-	unreachable();							\
-  } while (0)
+#include <asm/ptrace.h>
+
+struct task_struct;
+
+void show_regs(struct pt_regs *regs);
+void show_stacktrace(struct task_struct *tsk, struct pt_regs *regs,
+		     const char *loglvl);
+void show_kernel_fault_diag(const char *str, struct pt_regs *regs,
+			    unsigned long address);
+void die(const char *str, struct pt_regs *regs, unsigned long address);
+
+#define BUG()	do {								\
+	pr_warn("BUG: failure at %s:%d/%s()!\n", __FILE__, __LINE__, __func__); \
+	barrier_before_unreachable();						\
+	__builtin_trap();							\
+} while (0)
 
 #define HAVE_ARCH_BUG
-#endif
 
 #include <asm-generic/bug.h>
+
+#endif	/* !__ASSEMBLY__ */
 
 #endif
