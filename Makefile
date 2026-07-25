@@ -1,108 +1,61 @@
 # SPDX-License-Identifier: GPL-2.0
 #
-# Makefile for the linux kernel.
+# Makefile for alpha-specific library files..
 #
 
-extra-y		:= vmlinux.lds
-asflags-y	:= $(KBUILD_CFLAGS)
-ccflags-y	:= -Wno-sign-compare
+asflags-y := $(KBUILD_CFLAGS)
+ccflags-y := -Werror
 
-obj-y    := head.o entry.o traps.o process.o osf_sys.o irq.o \
-	    irq_alpha.o signal.o setup.o ptrace.o time.o \
-	    systbls.o err_common.o io.o bugs.o termios.o
+# Many of these routines have implementations tuned for ev6.
+# Choose them iff we're targeting ev6 specifically.
+ev6-$(CONFIG_ALPHA_EV6) := ev6-
 
-obj-$(CONFIG_VGA_HOSE)	+= console.o
-obj-$(CONFIG_SMP)	+= smp.o
-obj-$(CONFIG_PCI)	+= pci.o pci_iommu.o pci-sysfs.o
-obj-$(CONFIG_SRM_ENV)	+= srm_env.o
-obj-$(CONFIG_MODULES)	+= module.o
-obj-$(CONFIG_PERF_EVENTS) += perf_event.o
-obj-$(CONFIG_RTC_DRV_ALPHA) += rtc.o
-obj-$(CONFIG_AUDIT)	+= audit.o
+# Several make use of the cttz instruction introduced in ev67.
+ev67-$(CONFIG_ALPHA_EV67) := ev67-
 
-ifdef CONFIG_ALPHA_GENERIC
+lib-y =	__divqu.o __remqu.o __divlu.o __remlu.o \
+	udiv-qrnnd.o \
+	udelay.o \
+	$(ev6-y)memset.o \
+	$(ev6-y)memcpy.o \
+	memmove.o \
+	checksum.o \
+	csum_partial_copy.o \
+	$(ev67-y)strlen.o \
+	stycpy.o \
+	styncpy.o \
+	$(ev67-y)strchr.o \
+	$(ev67-y)strrchr.o \
+	$(ev6-y)memchr.o \
+	$(ev6-y)copy_user.o \
+	$(ev6-y)clear_user.o \
+	$(ev6-y)csum_ipv6_magic.o \
+	$(ev6-y)clear_page.o \
+	$(ev6-y)copy_page.o \
+	fpreg.o \
+	callback_srm.o srm_puts.o srm_printk.o \
+	fls.o
 
-obj-y 	 += core_apecs.o core_cia.o core_irongate.o core_lca.o \
-	    core_mcpcia.o core_polaris.o core_t2.o \
-	    core_tsunami.o
+# The division routines are built from single source, with different defines.
+AFLAGS___divqu.o = -DDIV
+AFLAGS___remqu.o =       -DREM
+AFLAGS___divlu.o = -DDIV       -DINTSIZE
+AFLAGS___remlu.o =       -DREM -DINTSIZE
 
-obj-y	 += sys_alcor.o sys_cabriolet.o sys_dp264.o sys_eb64p.o sys_eiger.o \
-	    sys_jensen.o sys_miata.o sys_mikasa.o sys_nautilus.o \
-	    sys_noritake.o sys_rawhide.o sys_ruffian.o sys_rx164.o \
-	    sys_sable.o sys_sio.o sys_sx164.o sys_takara.o
+$(addprefix $(obj)/,__divqu.o __remqu.o __divlu.o __remlu.o): \
+						$(src)/$(ev6-y)divide.S FORCE
+	$(call if_changed_rule,as_o_S)
 
-ifndef CONFIG_ALPHA_LEGACY_START_ADDRESS
-obj-y	 += core_marvel.o core_titan.o core_wildfire.o
-obj-y	 += sys_marvel.o sys_titan.o sys_wildfire.o
-obj-y    += err_ev7.o err_titan.o err_marvel.o
-endif
+# There are direct branches between {str*cpy,str*cat} and stx*cpy.
+# Ensure the branches are within range by merging these objects.
 
-obj-y	 += irq_pyxis.o irq_i8259.o irq_srm.o
-obj-y	 += err_ev6.o
-obj-y	 += es1888.o smc37c669.o smc37c93x.o pc873xx.o gct.o
-obj-y    += srmcons.o
+LDFLAGS_stycpy.o := -r
+LDFLAGS_styncpy.o := -r
 
-else
+$(obj)/stycpy.o: $(obj)/strcpy.o $(obj)/$(ev67-y)strcat.o \
+		 $(obj)/$(ev6-y)stxcpy.o FORCE
+	$(call if_changed,ld)
 
-# Misc support
-obj-$(CONFIG_ALPHA_SRM)		+= srmcons.o
-
-# Core logic support
-obj-$(CONFIG_ALPHA_APECS)	+= core_apecs.o
-obj-$(CONFIG_ALPHA_CIA)		+= core_cia.o
-obj-$(CONFIG_ALPHA_IRONGATE)	+= core_irongate.o
-obj-$(CONFIG_ALPHA_LCA)		+= core_lca.o
-obj-$(CONFIG_ALPHA_MARVEL)	+= core_marvel.o gct.o
-obj-$(CONFIG_ALPHA_MCPCIA)	+= core_mcpcia.o
-obj-$(CONFIG_ALPHA_POLARIS)	+= core_polaris.o
-obj-$(CONFIG_ALPHA_T2)		+= core_t2.o
-obj-$(CONFIG_ALPHA_TSUNAMI)	+= core_tsunami.o
-obj-$(CONFIG_ALPHA_TITAN)	+= core_titan.o
-obj-$(CONFIG_ALPHA_WILDFIRE)	+= core_wildfire.o
-
-# Board support
-obj-$(CONFIG_ALPHA_ALCOR)	+= sys_alcor.o irq_i8259.o irq_srm.o
-obj-$(CONFIG_ALPHA_CABRIOLET)	+= sys_cabriolet.o irq_i8259.o irq_srm.o \
-				   pc873xx.o
-obj-$(CONFIG_ALPHA_EB164)	+= sys_cabriolet.o irq_i8259.o irq_srm.o \
-				   pc873xx.o
-obj-$(CONFIG_ALPHA_EB66P)	+= sys_cabriolet.o irq_i8259.o irq_srm.o \
-				   pc873xx.o
-obj-$(CONFIG_ALPHA_LX164)	+= sys_cabriolet.o irq_i8259.o irq_srm.o \
-				   smc37c93x.o
-obj-$(CONFIG_ALPHA_PC164)	+= sys_cabriolet.o irq_i8259.o irq_srm.o \
-				   smc37c93x.o
-obj-$(CONFIG_ALPHA_DP264)	+= sys_dp264.o irq_i8259.o es1888.o smc37c669.o
-obj-$(CONFIG_ALPHA_SHARK)	+= sys_dp264.o irq_i8259.o es1888.o smc37c669.o
-obj-$(CONFIG_ALPHA_TITAN)	+= sys_titan.o irq_i8259.o smc37c669.o
-obj-$(CONFIG_ALPHA_EB64P)	+= sys_eb64p.o irq_i8259.o
-obj-$(CONFIG_ALPHA_EB66)	+= sys_eb64p.o irq_i8259.o
-obj-$(CONFIG_ALPHA_EIGER)	+= sys_eiger.o irq_i8259.o
-obj-$(CONFIG_ALPHA_JENSEN)	+= sys_jensen.o pci-noop.o irq_i8259.o
-obj-$(CONFIG_ALPHA_MARVEL)	+= sys_marvel.o 
-obj-$(CONFIG_ALPHA_MIATA)	+= sys_miata.o irq_pyxis.o irq_i8259.o \
-				   es1888.o smc37c669.o
-obj-$(CONFIG_ALPHA_MIKASA)	+= sys_mikasa.o irq_i8259.o irq_srm.o
-obj-$(CONFIG_ALPHA_NAUTILUS)	+= sys_nautilus.o irq_i8259.o irq_srm.o
-obj-$(CONFIG_ALPHA_NORITAKE)	+= sys_noritake.o irq_i8259.o
-obj-$(CONFIG_ALPHA_RAWHIDE)	+= sys_rawhide.o irq_i8259.o
-obj-$(CONFIG_ALPHA_RUFFIAN)	+= sys_ruffian.o irq_pyxis.o irq_i8259.o
-obj-$(CONFIG_ALPHA_RX164)	+= sys_rx164.o irq_i8259.o
-obj-$(CONFIG_ALPHA_SABLE)	+= sys_sable.o
-obj-$(CONFIG_ALPHA_LYNX)	+= sys_sable.o
-obj-$(CONFIG_ALPHA_BOOK1)	+= sys_sio.o irq_i8259.o irq_srm.o pc873xx.o
-obj-$(CONFIG_ALPHA_AVANTI)	+= sys_sio.o irq_i8259.o irq_srm.o pc873xx.o
-obj-$(CONFIG_ALPHA_NONAME)	+= sys_sio.o irq_i8259.o irq_srm.o pc873xx.o
-obj-$(CONFIG_ALPHA_P2K)		+= sys_sio.o irq_i8259.o irq_srm.o pc873xx.o
-obj-$(CONFIG_ALPHA_XL)		+= sys_sio.o irq_i8259.o irq_srm.o pc873xx.o
-obj-$(CONFIG_ALPHA_SX164)	+= sys_sx164.o irq_pyxis.o irq_i8259.o \
-				   irq_srm.o smc37c669.o
-obj-$(CONFIG_ALPHA_TAKARA)	+= sys_takara.o irq_i8259.o pc873xx.o
-obj-$(CONFIG_ALPHA_WILDFIRE)	+= sys_wildfire.o irq_i8259.o
-
-# Error support
-obj-$(CONFIG_ALPHA_MARVEL)	+= err_ev7.o err_marvel.o
-obj-$(CONFIG_ALPHA_NAUTILUS)	+= err_ev6.o
-obj-$(CONFIG_ALPHA_TITAN)	+= err_ev6.o err_titan.o
-
-endif # GENERIC
+$(obj)/styncpy.o: $(obj)/strncpy.o $(obj)/$(ev67-y)strncat.o \
+		 $(obj)/$(ev6-y)stxncpy.o FORCE
+	$(call if_changed,ld)
