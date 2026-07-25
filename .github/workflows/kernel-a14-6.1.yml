@@ -47,18 +47,12 @@ jobs:
           mv tmp_kernel/* ./
           rm -rf tmp_kernel
 
-      - name: 安装编译依赖
+      - name: 安装编译依赖（自带gcc，无需额外clang）
         run: |
           sudo apt update -y
           sudo apt install -y build-essential libssl-dev libelf-dev bison flex zip unzip lld llvm python3
 
-      # 替换为稳定可用的clang镜像，解决克隆失败
-      - name: 下载MT6989天玑专用Clang工具链
-        run: |
-          git clone https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r498229b clang --depth=1
-          echo "CLANG_BIN=$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_ENV
-          echo "PATH=$CLANG_BIN:$PATH" >> $GITHUB_ENV
-
+      # 删除原来clone clang的步骤，直接使用系统gcc
       - name: 拉取AK3 / Sukisu / SUSFS补丁
         run: |
           git clone https://github.com/ShirkNeko/ak3-patch scripts/patch_ak3 --depth=1
@@ -76,23 +70,16 @@ jobs:
         run: |
           export ARCH=arm64
           make oplus_plf110_defconfig
-          # 完整GKI镜像编译
           scripts/config --enable BUILD_GKI_BOOTIMG
-          # AK3调度优化
           scripts/config --enable CONFIG_AK3_SCHEDULER
-          # Sukisu内核基础
           scripts/config --enable CONFIG_SUKISU
           scripts/config --enable CONFIG_MODULES
-          # SUSFS完整隐藏模块
           scripts/config --enable CONFIG_KSU_SUSFS
           scripts/config --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
           scripts/config --enable CONFIG_KSU_SUSFS_SUS_PATH
           scripts/config --enable CONFIG_KSU_SUSFS_SUS_MOUNT
-          # 允许Oplus游戏驱动导出符号，兼容风驰内核模块
           scripts/config --enable CONFIG_OPLUS_GAME_DRIVER_EXPORT
-          # 禁用小米平板冗余配置
           scripts/config --disable CONFIG_HMBIRD
-          # ZRAM、KPM开关
           if [[ "${{ inputs.use_zram }}" == "false" ]]; then
             scripts/config --disable CONFIG_ZRAM
           fi
@@ -100,7 +87,7 @@ jobs:
             scripts/config --disable CONFIG_KPM
           fi
 
-      - name: 编译完整GKI内核镜像
+      - name: 编译完整GKI内核镜像（系统gcc编译）
         run: |
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
@@ -115,7 +102,7 @@ jobs:
           zip -r ../GKI-AK3-SUKISU-PLF110.zip *
           cd ..
 
-      - name: 发布刷机包到Release
+      - name: 发布刷机包到Releases
         if: ${{ inputs.make_release == true }}
         uses: softprops/action-gh-release@v1
         with:
