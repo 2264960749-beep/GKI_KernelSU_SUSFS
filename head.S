@@ -1,98 +1,94 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * arch/alpha/boot/head.S
+ * arch/alpha/kernel/head.S
  *
- * initial bootloader stuff..
+ * initial boot stuff.. At this point, the bootloader has already
+ * switched into OSF/1 PAL-code, and loaded us at the correct address
+ * (START_ADDR).  So there isn't much left for us to do: just set up
+ * the kernel global pointer and jump to the kernel entry-point.
  */
 
+#include <linux/init.h>
+#include <asm/asm-offsets.h>
 #include <asm/pal.h>
+#include <asm/setup.h>
 
+__HEAD
+.globl _stext
 	.set noreorder
 	.globl	__start
 	.ent	__start
+_stext:
 __start:
-	br	$29,2f
-2:	ldgp	$29,0($29)
+	.prologue 0
+	br	$27,1f
+1:	ldgp	$29,0($27)
+	/* We need to get current_task_info loaded up...  */
+	lda	$8,init_thread_union
+	/* ... and find our stack ... */
+	lda	$30,0x4000 - SIZEOF_PT_REGS($8)
+	/* ... and then we can start the kernel.  */
 	jsr	$26,start_kernel
 	call_pal PAL_halt
 	.end __start
 
-	.align 5
-	.globl	wrent
-	.ent	wrent
-wrent:
-	.prologue 0
-	call_pal PAL_wrent
-	ret ($26)
-	.end wrent
+#ifdef CONFIG_SMP
+	.align 3
+	.globl	__smp_callin
+	.ent	__smp_callin
+	/* On entry here from SRM console, the HWPCB of the per-cpu
+	   slot for this processor has been loaded.  We've arranged
+	   for the UNIQUE value for this process to contain the PCBB
+	   of the target idle task.  */
+__smp_callin:
+	.prologue 1
+	ldgp	$29,0($27)	# First order of business, load the GP.
 
-	.align 5
-	.globl	wrkgp
-	.ent	wrkgp
-wrkgp:
-	.prologue 0
-	call_pal PAL_wrkgp
-	ret ($26)
-	.end wrkgp
+	call_pal PAL_rduniq	# Grab the target PCBB.
+	mov	$0,$16		# Install it.
+	call_pal PAL_swpctx
 
-	.align 5
-	.globl	switch_to_osf_pal
-	.ent	switch_to_osf_pal
-switch_to_osf_pal:
-	subq	$30,128,$30
-	.frame	$30,128,$26
-	stq	$26,0($30)
-	stq	$1,8($30)
-	stq	$2,16($30)
-	stq	$3,24($30)
-	stq	$4,32($30)
-	stq	$5,40($30)
-	stq	$6,48($30)
-	stq	$7,56($30)
-	stq	$8,64($30)
-	stq	$9,72($30)
-	stq	$10,80($30)
-	stq	$11,88($30)
-	stq	$12,96($30)
-	stq	$13,104($30)
-	stq	$14,112($30)
-	stq	$15,120($30)
-	.prologue 0
+	lda	$8,0x3fff	# Find "current".
+	bic	$30,$8,$8
+	
+	jsr	$26,smp_callin
+	call_pal PAL_halt
+	.end __smp_callin
+#endif /* CONFIG_SMP */
 
-	stq	$30,0($17)	/* save KSP in PCB */
-
-	bis	$30,$30,$20	/* a4 = KSP */
-	br	$17,1f
-
-	ldq	$26,0($30)
-	ldq	$1,8($30)
-	ldq	$2,16($30)
-	ldq	$3,24($30)
-	ldq	$4,32($30)
-	ldq	$5,40($30)
-	ldq	$6,48($30)
-	ldq	$7,56($30)
-	ldq	$8,64($30)
-	ldq	$9,72($30)
-	ldq	$10,80($30)
-	ldq	$11,88($30)
-	ldq	$12,96($30)
-	ldq	$13,104($30)
-	ldq	$14,112($30)
-	ldq	$15,120($30)
-	addq	$30,128,$30
-	ret ($26)
-1:	call_pal PAL_swppal
-	.end	switch_to_osf_pal
+	#
+	# The following two functions are needed for supporting SRM PALcode
+	# on the PC164 (at least), since that PALcode manages the interrupt
+	# masking, and we cannot duplicate the effort without causing problems
+	#
 
 	.align 3
-	.globl	tbi
-	.ent	tbi
-tbi:
+	.globl	cserve_ena
+	.ent	cserve_ena
+cserve_ena:
 	.prologue 0
-	call_pal PAL_tbi
+	bis	$16,$16,$17
+	lda	$16,52($31)
+	call_pal PAL_cserve
 	ret	($26)
-	.end tbi
+	.end	cserve_ena
+
+	.align 3
+	.globl	cserve_dis
+	.ent	cserve_dis
+cserve_dis:
+	.prologue 0
+	bis	$16,$16,$17
+	lda	$16,53($31)
+	call_pal PAL_cserve
+	ret	($26)
+	.end	cserve_dis
+
+	#
+	# It is handy, on occasion, to make halt actually just loop. 
+	# Putting it here means we dont have to recompile the whole
+	# kernel.
+	#
 
 	.align 3
 	.globl	halt
@@ -100,25 +96,4 @@ tbi:
 halt:
 	.prologue 0
 	call_pal PAL_halt
-	.end halt
-
-/* $16 - new stack page */
-	.align 3
-	.globl	move_stack
-	.ent	move_stack
-move_stack:
-	.prologue 0
-	lda	$0, 0x1fff($31)
-	and	$0, $30, $1			/* Stack offset */
-	or	$1, $16, $16			/* New stack pointer */
-	mov	$30, $1
-	mov	$16, $2
-1:	ldq	$3, 0($1)			/* Move the stack */
-	addq	$1, 8, $1
-	stq	$3, 0($2)
-	and	$0, $1, $4
-	addq	$2, 8, $2
-	bne	$4, 1b
-	mov	$16, $30
-	ret	($26)
-	.end move_stack
+	.end	halt

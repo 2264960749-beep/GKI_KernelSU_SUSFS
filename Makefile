@@ -1,120 +1,108 @@
+# SPDX-License-Identifier: GPL-2.0
 #
-# arch/alpha/boot/Makefile
-#
-# This file is subject to the terms and conditions of the GNU General Public
-# License.  See the file "COPYING" in the main directory of this archive
-# for more details.
-#
-# Copyright (C) 1994 by Linus Torvalds
+# Makefile for the linux kernel.
 #
 
-hostprogs	:= tools/mkbb tools/objstrip
-targets		:= vmlinux.gz vmlinux \
-		   vmlinux.nh tools/lxboot tools/bootlx tools/bootph \
-		   tools/bootpzh bootloader bootpheader bootpzheader 
-OBJSTRIP	:= $(obj)/tools/objstrip
+extra-y		:= vmlinux.lds
+asflags-y	:= $(KBUILD_CFLAGS)
+ccflags-y	:= -Wno-sign-compare
 
-KBUILD_HOSTCFLAGS := -Wall -I$(objtree)/usr/include
-BOOTCFLAGS	+= -I$(objtree)/$(obj) -I$(srctree)/$(obj)
+obj-y    := head.o entry.o traps.o process.o osf_sys.o irq.o \
+	    irq_alpha.o signal.o setup.o ptrace.o time.o \
+	    systbls.o err_common.o io.o bugs.o termios.o
 
-# SRM bootable image.  Copy to offset 512 of a partition.
-$(obj)/bootimage: $(addprefix $(obj)/tools/,mkbb lxboot bootlx) $(obj)/vmlinux.nh
-	( cat $(obj)/tools/lxboot $(obj)/tools/bootlx $(obj)/vmlinux.nh ) > $@ 
-	$(obj)/tools/mkbb $@ $(obj)/tools/lxboot
-	@echo '  Bootimage $@ is ready'
+obj-$(CONFIG_VGA_HOSE)	+= console.o
+obj-$(CONFIG_SMP)	+= smp.o
+obj-$(CONFIG_PCI)	+= pci.o pci_iommu.o pci-sysfs.o
+obj-$(CONFIG_SRM_ENV)	+= srm_env.o
+obj-$(CONFIG_MODULES)	+= module.o
+obj-$(CONFIG_PERF_EVENTS) += perf_event.o
+obj-$(CONFIG_RTC_DRV_ALPHA) += rtc.o
+obj-$(CONFIG_AUDIT)	+= audit.o
 
-# BOOTP bootable image.  Define INITRD during make to append initrd image.
-$(obj)/bootpfile: $(obj)/tools/bootph $(obj)/vmlinux.nh
-	cat $(obj)/tools/bootph $(obj)/vmlinux.nh > $@
-ifdef INITRD
-	cat $(INITRD) >> $@
+ifdef CONFIG_ALPHA_GENERIC
+
+obj-y 	 += core_apecs.o core_cia.o core_irongate.o core_lca.o \
+	    core_mcpcia.o core_polaris.o core_t2.o \
+	    core_tsunami.o
+
+obj-y	 += sys_alcor.o sys_cabriolet.o sys_dp264.o sys_eb64p.o sys_eiger.o \
+	    sys_jensen.o sys_miata.o sys_mikasa.o sys_nautilus.o \
+	    sys_noritake.o sys_rawhide.o sys_ruffian.o sys_rx164.o \
+	    sys_sable.o sys_sio.o sys_sx164.o sys_takara.o
+
+ifndef CONFIG_ALPHA_LEGACY_START_ADDRESS
+obj-y	 += core_marvel.o core_titan.o core_wildfire.o
+obj-y	 += sys_marvel.o sys_titan.o sys_wildfire.o
+obj-y    += err_ev7.o err_titan.o err_marvel.o
 endif
 
-# Compressed kernel BOOTP bootable image.
-# Define INITRD during make to append initrd image.
-$(obj)/bootpzfile: $(obj)/tools/bootpzh $(obj)/vmlinux.nh.gz
-	cat $(obj)/tools/bootpzh $(obj)/vmlinux.nh.gz > $@
-ifdef INITRD
-	cat $(INITRD) >> $@
-endif
+obj-y	 += irq_pyxis.o irq_i8259.o irq_srm.o
+obj-y	 += err_ev6.o
+obj-y	 += es1888.o smc37c669.o smc37c93x.o pc873xx.o gct.o
+obj-y    += srmcons.o
 
-# Compressed kernel image
-$(obj)/vmlinux.gz: $(obj)/vmlinux FORCE
-	$(call if_changed,gzip)
-	@echo '  Kernel $@ is ready'
+else
 
-$(obj)/main.o: $(obj)/ksize.h
-$(obj)/bootp.o: $(obj)/ksize.h
-$(obj)/bootpz.o: $(obj)/kzsize.h
+# Misc support
+obj-$(CONFIG_ALPHA_SRM)		+= srmcons.o
 
-$(obj)/ksize.h: $(obj)/vmlinux.nh FORCE
-	echo "#define KERNEL_SIZE `ls -l $(obj)/vmlinux.nh | awk '{print $$5}'`" > $@T
-ifdef INITRD
-	[ -f $(INITRD) ] || exit 1
-	echo "#define INITRD_IMAGE_SIZE `ls -l $(INITRD) | awk '{print $$5}'`" >> $@T
-endif
-	cmp -s $@T $@ || mv -f $@T $@
-	rm -f $@T
+# Core logic support
+obj-$(CONFIG_ALPHA_APECS)	+= core_apecs.o
+obj-$(CONFIG_ALPHA_CIA)		+= core_cia.o
+obj-$(CONFIG_ALPHA_IRONGATE)	+= core_irongate.o
+obj-$(CONFIG_ALPHA_LCA)		+= core_lca.o
+obj-$(CONFIG_ALPHA_MARVEL)	+= core_marvel.o gct.o
+obj-$(CONFIG_ALPHA_MCPCIA)	+= core_mcpcia.o
+obj-$(CONFIG_ALPHA_POLARIS)	+= core_polaris.o
+obj-$(CONFIG_ALPHA_T2)		+= core_t2.o
+obj-$(CONFIG_ALPHA_TSUNAMI)	+= core_tsunami.o
+obj-$(CONFIG_ALPHA_TITAN)	+= core_titan.o
+obj-$(CONFIG_ALPHA_WILDFIRE)	+= core_wildfire.o
 
-$(obj)/kzsize.h: $(obj)/vmlinux.nh.gz FORCE
-	echo "#define KERNEL_SIZE `ls -l $(obj)/vmlinux.nh | awk '{print $$5}'`" > $@T
-	echo "#define KERNEL_Z_SIZE `ls -l $(obj)/vmlinux.nh.gz | awk '{print $$5}'`" >> $@T
-ifdef INITRD
-	[ -f $(INITRD) ] || exit 1
-	echo "#define INITRD_IMAGE_SIZE `ls -l $(INITRD) | awk '{print $$5}'`" >> $@T
-endif
-	cmp -s $@T $@ || mv -f $@T $@
-	rm -f $@T
+# Board support
+obj-$(CONFIG_ALPHA_ALCOR)	+= sys_alcor.o irq_i8259.o irq_srm.o
+obj-$(CONFIG_ALPHA_CABRIOLET)	+= sys_cabriolet.o irq_i8259.o irq_srm.o \
+				   pc873xx.o
+obj-$(CONFIG_ALPHA_EB164)	+= sys_cabriolet.o irq_i8259.o irq_srm.o \
+				   pc873xx.o
+obj-$(CONFIG_ALPHA_EB66P)	+= sys_cabriolet.o irq_i8259.o irq_srm.o \
+				   pc873xx.o
+obj-$(CONFIG_ALPHA_LX164)	+= sys_cabriolet.o irq_i8259.o irq_srm.o \
+				   smc37c93x.o
+obj-$(CONFIG_ALPHA_PC164)	+= sys_cabriolet.o irq_i8259.o irq_srm.o \
+				   smc37c93x.o
+obj-$(CONFIG_ALPHA_DP264)	+= sys_dp264.o irq_i8259.o es1888.o smc37c669.o
+obj-$(CONFIG_ALPHA_SHARK)	+= sys_dp264.o irq_i8259.o es1888.o smc37c669.o
+obj-$(CONFIG_ALPHA_TITAN)	+= sys_titan.o irq_i8259.o smc37c669.o
+obj-$(CONFIG_ALPHA_EB64P)	+= sys_eb64p.o irq_i8259.o
+obj-$(CONFIG_ALPHA_EB66)	+= sys_eb64p.o irq_i8259.o
+obj-$(CONFIG_ALPHA_EIGER)	+= sys_eiger.o irq_i8259.o
+obj-$(CONFIG_ALPHA_JENSEN)	+= sys_jensen.o pci-noop.o irq_i8259.o
+obj-$(CONFIG_ALPHA_MARVEL)	+= sys_marvel.o 
+obj-$(CONFIG_ALPHA_MIATA)	+= sys_miata.o irq_pyxis.o irq_i8259.o \
+				   es1888.o smc37c669.o
+obj-$(CONFIG_ALPHA_MIKASA)	+= sys_mikasa.o irq_i8259.o irq_srm.o
+obj-$(CONFIG_ALPHA_NAUTILUS)	+= sys_nautilus.o irq_i8259.o irq_srm.o
+obj-$(CONFIG_ALPHA_NORITAKE)	+= sys_noritake.o irq_i8259.o
+obj-$(CONFIG_ALPHA_RAWHIDE)	+= sys_rawhide.o irq_i8259.o
+obj-$(CONFIG_ALPHA_RUFFIAN)	+= sys_ruffian.o irq_pyxis.o irq_i8259.o
+obj-$(CONFIG_ALPHA_RX164)	+= sys_rx164.o irq_i8259.o
+obj-$(CONFIG_ALPHA_SABLE)	+= sys_sable.o
+obj-$(CONFIG_ALPHA_LYNX)	+= sys_sable.o
+obj-$(CONFIG_ALPHA_BOOK1)	+= sys_sio.o irq_i8259.o irq_srm.o pc873xx.o
+obj-$(CONFIG_ALPHA_AVANTI)	+= sys_sio.o irq_i8259.o irq_srm.o pc873xx.o
+obj-$(CONFIG_ALPHA_NONAME)	+= sys_sio.o irq_i8259.o irq_srm.o pc873xx.o
+obj-$(CONFIG_ALPHA_P2K)		+= sys_sio.o irq_i8259.o irq_srm.o pc873xx.o
+obj-$(CONFIG_ALPHA_XL)		+= sys_sio.o irq_i8259.o irq_srm.o pc873xx.o
+obj-$(CONFIG_ALPHA_SX164)	+= sys_sx164.o irq_pyxis.o irq_i8259.o \
+				   irq_srm.o smc37c669.o
+obj-$(CONFIG_ALPHA_TAKARA)	+= sys_takara.o irq_i8259.o pc873xx.o
+obj-$(CONFIG_ALPHA_WILDFIRE)	+= sys_wildfire.o irq_i8259.o
 
-quiet_cmd_strip = STRIP  $@
-      cmd_strip = $(STRIP) -o $@ $<
+# Error support
+obj-$(CONFIG_ALPHA_MARVEL)	+= err_ev7.o err_marvel.o
+obj-$(CONFIG_ALPHA_NAUTILUS)	+= err_ev6.o
+obj-$(CONFIG_ALPHA_TITAN)	+= err_ev6.o err_titan.o
 
-$(obj)/vmlinux: vmlinux FORCE
-	$(call if_changed,strip)
-
-quiet_cmd_objstrip = OBJSTRIP $@
-      cmd_objstrip = $(OBJSTRIP) $(OSFLAGS_$(@F)) $< $@
-
-OSFLAGS_vmlinux.nh	:= -v
-OSFLAGS_lxboot		:= -p
-OSFLAGS_bootlx		:= -vb
-OSFLAGS_bootph		:= -vb
-OSFLAGS_bootpzh		:= -vb
-
-$(obj)/vmlinux.nh: vmlinux $(OBJSTRIP) FORCE
-	$(call if_changed,objstrip)
-
-$(obj)/vmlinux.nh.gz: $(obj)/vmlinux.nh FORCE
-	$(call if_changed,gzip)
-
-$(obj)/tools/lxboot: $(obj)/bootloader $(OBJSTRIP) FORCE
-	$(call if_changed,objstrip)
-
-$(obj)/tools/bootlx: $(obj)/bootloader $(OBJSTRIP) FORCE
-	$(call if_changed,objstrip)
-
-$(obj)/tools/bootph: $(obj)/bootpheader $(OBJSTRIP) FORCE
-	$(call if_changed,objstrip)
-
-$(obj)/tools/bootpzh: $(obj)/bootpzheader $(OBJSTRIP) FORCE
-	$(call if_changed,objstrip)
-
-LDFLAGS_bootloader   := -static -T # -N -relax
-LDFLAGS_bootloader   := -static -T # -N -relax
-LDFLAGS_bootpheader  := -static -T # -N -relax
-LDFLAGS_bootpzheader := -static -T # -N -relax
-
-OBJ_bootlx   := $(obj)/head.o $(obj)/stdio.o $(obj)/main.o
-OBJ_bootph   := $(obj)/head.o $(obj)/stdio.o $(obj)/bootp.o
-OBJ_bootpzh  := $(obj)/head.o $(obj)/stdio.o $(obj)/bootpz.o $(obj)/misc.o
-
-$(obj)/bootloader: $(obj)/bootloader.lds $(OBJ_bootlx) $(LIBS_Y) FORCE
-	$(call if_changed,ld)
-
-$(obj)/bootpheader: $(obj)/bootloader.lds $(OBJ_bootph) $(LIBS_Y) FORCE
-	$(call if_changed,ld)
-
-$(obj)/bootpzheader: $(obj)/bootloader.lds $(OBJ_bootpzh) $(LIBS_Y) FORCE
-	$(call if_changed,ld)
-
-$(obj)/misc.o: lib/inflate.c
+endif # GENERIC
