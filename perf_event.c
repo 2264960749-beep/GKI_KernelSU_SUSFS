@@ -1,899 +1,850 @@
-// SPDX-License-Identifier: GPL-2.0
-/*
- * Hardware performance events for the Alpha.
- *
- * We implement HW counts on the EV67 and subsequent CPUs only.
- *
- * (C) 2010 Michael J. Cree
- *
- * Somewhat based on the Sparc code, and to a lesser extent the PowerPC and
- * ARM code, which are copyright by their respective authors.
- */
+// SPDX-License-Identifier: GPL-2.0+
+//
+// Linux performance counter support for ARC CPUs.
+// This code is inspired by the perf support of various other architectures.
+//
+// Copyright (C) 2013-2018 Synopsys, Inc. (www.synopsys.com)
 
+#include <linux/errno.h>
+#include <linux/interrupt.h>
+#include <linux/module.h>
+#include <linux/of.h>
 #include <linux/perf_event.h>
-#include <linux/kprobes.h>
-#include <linux/kernel.h>
-#include <linux/kdebug.h>
-#include <linux/mutex.h>
-#include <linux/init.h>
+#include <linux/platform_device.h>
+#include <asm/arcregs.h>
+#include <asm/stacktrace.h>
 
-#include <asm/hwrpb.h>
-#include <linux/atomic.h>
-#include <asm/irq.h>
-#include <asm/irq_regs.h>
-#include <asm/pal.h>
-#include <asm/wrperfmon.h>
-#include <asm/hw_irq.h>
-
-
-/* The maximum number of PMCs on any Alpha CPU whatsoever. */
-#define MAX_HWEVENTS 3
-#define PMC_NO_INDEX -1
-
-/* For tracking PMCs and the hw events they monitor on each CPU. */
-struct cpu_hw_events {
-	int			enabled;
-	/* Number of events scheduled; also number entries valid in arrays below. */
-	int			n_events;
-	/* Number events added since last hw_perf_disable(). */
-	int			n_added;
-	/* Events currently scheduled. */
-	struct perf_event	*event[MAX_HWEVENTS];
-	/* Event type of each scheduled event. */
-	unsigned long		evtype[MAX_HWEVENTS];
-	/* Current index of each scheduled event; if not yet determined
-	 * contains PMC_NO_INDEX.
-	 */
-	int			current_idx[MAX_HWEVENTS];
-	/* The active PMCs' config for easy use with wrperfmon(). */
-	unsigned long		config;
-	/* The active counters' indices for easy use with wrperfmon(). */
-	unsigned long		idx_mask;
-};
-DEFINE_PER_CPU(struct cpu_hw_events, cpu_hw_events);
-
-
+/* HW holds 8 symbols + one for null terminator */
+#define ARCPMU_EVENT_NAME_LEN	9
 
 /*
- * A structure to hold the description of the PMCs available on a particular
- * type of Alpha CPU.
- */
-struct alpha_pmu_t {
-	/* Mapping of the perf system hw event types to indigenous event types */
-	const int *event_map;
-	/* The number of entries in the event_map */
-	int  max_events;
-	/* The number of PMCs on this Alpha */
-	int  num_pmcs;
-	/*
-	 * All PMC counters reside in the IBOX register PCTR.  This is the
-	 * LSB of the counter.
-	 */
-	int  pmc_count_shift[MAX_HWEVENTS];
-	/*
-	 * The mask that isolates the PMC bits when the LSB of the counter
-	 * is shifted to bit 0.
-	 */
-	unsigned long pmc_count_mask[MAX_HWEVENTS];
-	/* The maximum period the PMC can count. */
-	unsigned long pmc_max_period[MAX_HWEVENTS];
-	/*
-	 * The maximum value that may be written to the counter due to
-	 * hardware restrictions is pmc_max_period - pmc_left.
-	 */
-	long pmc_left[3];
-	 /* Subroutine for allocation of PMCs.  Enforces constraints. */
-	int (*check_constraints)(struct perf_event **, unsigned long *, int);
-	/* Subroutine for checking validity of a raw event for this PMU. */
-	int (*raw_event_valid)(u64 config);
-};
-
-/*
- * The Alpha CPU PMU description currently in operation.  This is set during
- * the boot process to the specific CPU of the machine.
- */
-static const struct alpha_pmu_t *alpha_pmu;
-
-
-#define HW_OP_UNSUPPORTED -1
-
-/*
- * The hardware description of the EV67, EV68, EV69, EV7 and EV79 PMUs
- * follow. Since they are identical we refer to them collectively as the
- * EV67 henceforth.
- */
-
-/*
- * EV67 PMC event types
+ * Some ARC pct quirks:
  *
- * There is no one-to-one mapping of the possible hw event types to the
- * actual codes that are used to program the PMCs hence we introduce our
- * own hw event type identifiers.
+ * PERF_COUNT_HW_STALLED_CYCLES_BACKEND
+ * PERF_COUNT_HW_STALLED_CYCLES_FRONTEND
+ *	The ARC 700 can either measure stalls per pipeline stage, or all stalls
+ *	combined; for now we assign all stalls to STALLED_CYCLES_BACKEND
+ *	and all pipeline flushes (e.g. caused by mispredicts, etc.) to
+ *	STALLED_CYCLES_FRONTEND.
+ *
+ *	We could start multiple performance counters and combine everything
+ *	afterwards, but that makes it complicated.
+ *
+ *	Note that I$ cache misses aren't counted by either of the two!
  */
-enum ev67_pmc_event_type {
-	EV67_CYCLES = 1,
-	EV67_INSTRUCTIONS,
-	EV67_BCACHEMISS,
-	EV67_MBOXREPLAY,
-	EV67_LAST_ET
-};
-#define EV67_NUM_EVENT_TYPES (EV67_LAST_ET-EV67_CYCLES)
-
-
-/* Mapping of the hw event types to the perf tool interface */
-static const int ev67_perfmon_event_map[] = {
-	[PERF_COUNT_HW_CPU_CYCLES]	 = EV67_CYCLES,
-	[PERF_COUNT_HW_INSTRUCTIONS]	 = EV67_INSTRUCTIONS,
-	[PERF_COUNT_HW_CACHE_REFERENCES] = HW_OP_UNSUPPORTED,
-	[PERF_COUNT_HW_CACHE_MISSES]	 = EV67_BCACHEMISS,
-};
-
-struct ev67_mapping_t {
-	int config;
-	int idx;
-};
 
 /*
- * The mapping used for one event only - these must be in same order as enum
- * ev67_pmc_event_type definition.
+ * ARC PCT has hardware conditions with fixed "names" but variable "indexes"
+ * (based on a specific RTL build)
+ * Below is the static map between perf generic/arc specific event_id and
+ * h/w condition names.
+ * At the time of probe, we loop thru each index and find it's name to
+ * complete the mapping of perf event_id to h/w index as latter is needed
+ * to program the counter really
  */
-static const struct ev67_mapping_t ev67_mapping[] = {
-	{EV67_PCTR_INSTR_CYCLES, 1},	 /* EV67_CYCLES, */
-	{EV67_PCTR_INSTR_CYCLES, 0},	 /* EV67_INSTRUCTIONS */
-	{EV67_PCTR_INSTR_BCACHEMISS, 1}, /* EV67_BCACHEMISS */
-	{EV67_PCTR_CYCLES_MBOX, 1}	 /* EV67_MBOXREPLAY */
+static const char * const arc_pmu_ev_hw_map[] = {
+	/* count cycles */
+	[PERF_COUNT_HW_CPU_CYCLES] = "crun",
+	[PERF_COUNT_HW_REF_CPU_CYCLES] = "crun",
+	[PERF_COUNT_HW_BUS_CYCLES] = "crun",
+
+	[PERF_COUNT_HW_STALLED_CYCLES_FRONTEND] = "bflush",
+	[PERF_COUNT_HW_STALLED_CYCLES_BACKEND] = "bstall",
+
+	/* counts condition */
+	[PERF_COUNT_HW_INSTRUCTIONS] = "iall",
+	/* All jump instructions that are taken */
+	[PERF_COUNT_HW_BRANCH_INSTRUCTIONS] = "ijmptak",
+#ifdef CONFIG_ISA_ARCV2
+	[PERF_COUNT_HW_BRANCH_MISSES] = "bpmp",
+#else
+	[PERF_COUNT_ARC_BPOK]         = "bpok",	  /* NP-NT, PT-T, PNT-NT */
+	[PERF_COUNT_HW_BRANCH_MISSES] = "bpfail", /* NP-T, PT-NT, PNT-T */
+#endif
+	[PERF_COUNT_ARC_LDC] = "imemrdc",	/* Instr: mem read cached */
+	[PERF_COUNT_ARC_STC] = "imemwrc",	/* Instr: mem write cached */
+
+	[PERF_COUNT_ARC_DCLM] = "dclm",		/* D-cache Load Miss */
+	[PERF_COUNT_ARC_DCSM] = "dcsm",		/* D-cache Store Miss */
+	[PERF_COUNT_ARC_ICM] = "icm",		/* I-cache Miss */
+	[PERF_COUNT_ARC_EDTLB] = "edtlb",	/* D-TLB Miss */
+	[PERF_COUNT_ARC_EITLB] = "eitlb",	/* I-TLB Miss */
+
+	[PERF_COUNT_HW_CACHE_REFERENCES] = "imemrdc",	/* Instr: mem read cached */
+	[PERF_COUNT_HW_CACHE_MISSES] = "dclm",		/* D-cache Load Miss */
 };
 
+#define C(_x)			PERF_COUNT_HW_CACHE_##_x
+#define CACHE_OP_UNSUPPORTED	0xffff
 
-/*
- * Check that a group of events can be simultaneously scheduled on to the
- * EV67 PMU.  Also allocate counter indices and config.
- */
-static int ev67_check_constraints(struct perf_event **event,
-				unsigned long *evtype, int n_ev)
-{
-	int idx0;
-	unsigned long config;
-
-	idx0 = ev67_mapping[evtype[0]-1].idx;
-	config = ev67_mapping[evtype[0]-1].config;
-	if (n_ev == 1)
-		goto success;
-
-	BUG_ON(n_ev != 2);
-
-	if (evtype[0] == EV67_MBOXREPLAY || evtype[1] == EV67_MBOXREPLAY) {
-		/* MBOX replay traps must be on PMC 1 */
-		idx0 = (evtype[0] == EV67_MBOXREPLAY) ? 1 : 0;
-		/* Only cycles can accompany MBOX replay traps */
-		if (evtype[idx0] == EV67_CYCLES) {
-			config = EV67_PCTR_CYCLES_MBOX;
-			goto success;
-		}
-	}
-
-	if (evtype[0] == EV67_BCACHEMISS || evtype[1] == EV67_BCACHEMISS) {
-		/* Bcache misses must be on PMC 1 */
-		idx0 = (evtype[0] == EV67_BCACHEMISS) ? 1 : 0;
-		/* Only instructions can accompany Bcache misses */
-		if (evtype[idx0] == EV67_INSTRUCTIONS) {
-			config = EV67_PCTR_INSTR_BCACHEMISS;
-			goto success;
-		}
-	}
-
-	if (evtype[0] == EV67_INSTRUCTIONS || evtype[1] == EV67_INSTRUCTIONS) {
-		/* Instructions must be on PMC 0 */
-		idx0 = (evtype[0] == EV67_INSTRUCTIONS) ? 0 : 1;
-		/* By this point only cycles can accompany instructions */
-		if (evtype[idx0^1] == EV67_CYCLES) {
-			config = EV67_PCTR_INSTR_CYCLES;
-			goto success;
-		}
-	}
-
-	/* Otherwise, darn it, there is a conflict.  */
-	return -1;
-
-success:
-	event[0]->hw.idx = idx0;
-	event[0]->hw.config_base = config;
-	if (n_ev == 2) {
-		event[1]->hw.idx = idx0 ^ 1;
-		event[1]->hw.config_base = config;
-	}
-	return 0;
-}
-
-
-static int ev67_raw_event_valid(u64 config)
-{
-	return config >= EV67_CYCLES && config < EV67_LAST_ET;
+static const unsigned int arc_pmu_cache_map[C(MAX)][C(OP_MAX)][C(RESULT_MAX)] = {
+	[C(L1D)] = {
+		[C(OP_READ)] = {
+			[C(RESULT_ACCESS)]	= PERF_COUNT_ARC_LDC,
+			[C(RESULT_MISS)]	= PERF_COUNT_ARC_DCLM,
+		},
+		[C(OP_WRITE)] = {
+			[C(RESULT_ACCESS)]	= PERF_COUNT_ARC_STC,
+			[C(RESULT_MISS)]	= PERF_COUNT_ARC_DCSM,
+		},
+		[C(OP_PREFETCH)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+	},
+	[C(L1I)] = {
+		[C(OP_READ)] = {
+			[C(RESULT_ACCESS)]	= PERF_COUNT_HW_INSTRUCTIONS,
+			[C(RESULT_MISS)]	= PERF_COUNT_ARC_ICM,
+		},
+		[C(OP_WRITE)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+		[C(OP_PREFETCH)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+	},
+	[C(LL)] = {
+		[C(OP_READ)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+		[C(OP_WRITE)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+		[C(OP_PREFETCH)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+	},
+	[C(DTLB)] = {
+		[C(OP_READ)] = {
+			[C(RESULT_ACCESS)]	= PERF_COUNT_ARC_LDC,
+			[C(RESULT_MISS)]	= PERF_COUNT_ARC_EDTLB,
+		},
+			/* DTLB LD/ST Miss not segregated by h/w*/
+		[C(OP_WRITE)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+		[C(OP_PREFETCH)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+	},
+	[C(ITLB)] = {
+		[C(OP_READ)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= PERF_COUNT_ARC_EITLB,
+		},
+		[C(OP_WRITE)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+		[C(OP_PREFETCH)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+	},
+	[C(BPU)] = {
+		[C(OP_READ)] = {
+			[C(RESULT_ACCESS)] = PERF_COUNT_HW_BRANCH_INSTRUCTIONS,
+			[C(RESULT_MISS)]	= PERF_COUNT_HW_BRANCH_MISSES,
+		},
+		[C(OP_WRITE)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+		[C(OP_PREFETCH)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+	},
+	[C(NODE)] = {
+		[C(OP_READ)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+		[C(OP_WRITE)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+		[C(OP_PREFETCH)] = {
+			[C(RESULT_ACCESS)]	= CACHE_OP_UNSUPPORTED,
+			[C(RESULT_MISS)]	= CACHE_OP_UNSUPPORTED,
+		},
+	},
 };
 
-
-static const struct alpha_pmu_t ev67_pmu = {
-	.event_map = ev67_perfmon_event_map,
-	.max_events = ARRAY_SIZE(ev67_perfmon_event_map),
-	.num_pmcs = 2,
-	.pmc_count_shift = {EV67_PCTR_0_COUNT_SHIFT, EV67_PCTR_1_COUNT_SHIFT, 0},
-	.pmc_count_mask = {EV67_PCTR_0_COUNT_MASK,  EV67_PCTR_1_COUNT_MASK,  0},
-	.pmc_max_period = {(1UL<<20) - 1, (1UL<<20) - 1, 0},
-	.pmc_left = {16, 4, 0},
-	.check_constraints = ev67_check_constraints,
-	.raw_event_valid = ev67_raw_event_valid,
+enum arc_pmu_attr_groups {
+	ARCPMU_ATTR_GR_EVENTS,
+	ARCPMU_ATTR_GR_FORMATS,
+	ARCPMU_NR_ATTR_GR
 };
 
+struct arc_pmu_raw_event_entry {
+	char name[ARCPMU_EVENT_NAME_LEN];
+};
 
+struct arc_pmu {
+	struct pmu	pmu;
+	unsigned int	irq;
+	int		n_counters;
+	int		n_events;
+	u64		max_period;
+	int		ev_hw_idx[PERF_COUNT_ARC_HW_MAX];
 
-/*
- * Helper routines to ensure that we read/write only the correct PMC bits
- * when calling the wrperfmon PALcall.
- */
-static inline void alpha_write_pmc(int idx, unsigned long val)
-{
-	val &= alpha_pmu->pmc_count_mask[idx];
-	val <<= alpha_pmu->pmc_count_shift[idx];
-	val |= (1<<idx);
-	wrperfmon(PERFMON_CMD_WRITE, val);
-}
+	struct arc_pmu_raw_event_entry	*raw_entry;
+	struct attribute		**attrs;
+	struct perf_pmu_events_attr	*attr;
+	const struct attribute_group	*attr_groups[ARCPMU_NR_ATTR_GR + 1];
+};
 
-static inline unsigned long alpha_read_pmc(int idx)
-{
-	unsigned long val;
-
-	val = wrperfmon(PERFMON_CMD_READ, 0);
-	val >>= alpha_pmu->pmc_count_shift[idx];
-	val &= alpha_pmu->pmc_count_mask[idx];
-	return val;
-}
-
-/* Set a new period to sample over */
-static int alpha_perf_event_set_period(struct perf_event *event,
-				struct hw_perf_event *hwc, int idx)
-{
-	long left = local64_read(&hwc->period_left);
-	long period = hwc->sample_period;
-	int ret = 0;
-
-	if (unlikely(left <= -period)) {
-		left = period;
-		local64_set(&hwc->period_left, left);
-		hwc->last_period = period;
-		ret = 1;
-	}
-
-	if (unlikely(left <= 0)) {
-		left += period;
-		local64_set(&hwc->period_left, left);
-		hwc->last_period = period;
-		ret = 1;
-	}
+struct arc_pmu_cpu {
+	/*
+	 * A 1 bit for an index indicates that the counter is being used for
+	 * an event. A 0 means that the counter can be used.
+	 */
+	unsigned long	used_mask[BITS_TO_LONGS(ARC_PERF_MAX_COUNTERS)];
 
 	/*
-	 * Hardware restrictions require that the counters must not be
-	 * written with values that are too close to the maximum period.
+	 * The events that are active on the PMU for the given index.
 	 */
-	if (unlikely(left < alpha_pmu->pmc_left[idx]))
-		left = alpha_pmu->pmc_left[idx];
+	struct perf_event *act_counter[ARC_PERF_MAX_COUNTERS];
+};
 
-	if (left > (long)alpha_pmu->pmc_max_period[idx])
-		left = alpha_pmu->pmc_max_period[idx];
+struct arc_callchain_trace {
+	int depth;
+	void *perf_stuff;
+};
 
-	local64_set(&hwc->prev_count, (unsigned long)(-left));
-
-	alpha_write_pmc(idx, (unsigned long)(-left));
-
-	perf_event_update_userpage(event);
-
-	return ret;
-}
-
-
-/*
- * Calculates the count (the 'delta') since the last time the PMC was read.
- *
- * As the PMCs' full period can easily be exceeded within the perf system
- * sampling period we cannot use any high order bits as a guard bit in the
- * PMCs to detect overflow as is done by other architectures.  The code here
- * calculates the delta on the basis that there is no overflow when ovf is
- * zero.  The value passed via ovf by the interrupt handler corrects for
- * overflow.
- *
- * This can be racey on rare occasions -- a call to this routine can occur
- * with an overflowed counter just before the PMI service routine is called.
- * The check for delta negative hopefully always rectifies this situation.
- */
-static unsigned long alpha_perf_event_update(struct perf_event *event,
-					struct hw_perf_event *hwc, int idx, long ovf)
+static int callchain_trace(unsigned int addr, void *data)
 {
-	long prev_raw_count, new_raw_count;
-	long delta;
+	struct arc_callchain_trace *ctrl = data;
+	struct perf_callchain_entry_ctx *entry = ctrl->perf_stuff;
 
-again:
-	prev_raw_count = local64_read(&hwc->prev_count);
-	new_raw_count = alpha_read_pmc(idx);
+	perf_callchain_store(entry, addr);
 
-	if (local64_cmpxchg(&hwc->prev_count, prev_raw_count,
-			     new_raw_count) != prev_raw_count)
-		goto again;
-
-	delta = (new_raw_count - (prev_raw_count & alpha_pmu->pmc_count_mask[idx])) + ovf;
-
-	/* It is possible on very rare occasions that the PMC has overflowed
-	 * but the interrupt is yet to come.  Detect and fix this situation.
-	 */
-	if (unlikely(delta < 0)) {
-		delta += alpha_pmu->pmc_max_period[idx] + 1;
-	}
-
-	local64_add(delta, &event->count);
-	local64_sub(delta, &hwc->period_left);
-
-	return new_raw_count;
-}
-
-
-/*
- * Collect all HW events into the array event[].
- */
-static int collect_events(struct perf_event *group, int max_count,
-			  struct perf_event *event[], unsigned long *evtype,
-			  int *current_idx)
-{
-	struct perf_event *pe;
-	int n = 0;
-
-	if (!is_software_event(group)) {
-		if (n >= max_count)
-			return -1;
-		event[n] = group;
-		evtype[n] = group->hw.event_base;
-		current_idx[n++] = PMC_NO_INDEX;
-	}
-	for_each_sibling_event(pe, group) {
-		if (!is_software_event(pe) && pe->state != PERF_EVENT_STATE_OFF) {
-			if (n >= max_count)
-				return -1;
-			event[n] = pe;
-			evtype[n] = pe->hw.event_base;
-			current_idx[n++] = PMC_NO_INDEX;
-		}
-	}
-	return n;
-}
-
-
-
-/*
- * Check that a group of events can be simultaneously scheduled on to the PMU.
- */
-static int alpha_check_constraints(struct perf_event **events,
-				   unsigned long *evtypes, int n_ev)
-{
-
-	/* No HW events is possible from hw_perf_group_sched_in(). */
-	if (n_ev == 0)
+	if (ctrl->depth++ < 3)
 		return 0;
 
-	if (n_ev > alpha_pmu->num_pmcs)
-		return -1;
-
-	return alpha_pmu->check_constraints(events, evtypes, n_ev);
+	return -1;
 }
 
-
-/*
- * If new events have been scheduled then update cpuc with the new
- * configuration.  This may involve shifting cycle counts from one PMC to
- * another.
- */
-static void maybe_change_configuration(struct cpu_hw_events *cpuc)
+void perf_callchain_kernel(struct perf_callchain_entry_ctx *entry,
+			   struct pt_regs *regs)
 {
-	int j;
+	struct arc_callchain_trace ctrl = {
+		.depth = 0,
+		.perf_stuff = entry,
+	};
 
-	if (cpuc->n_added == 0)
-		return;
-
-	/* Find counters that are moving to another PMC and update */
-	for (j = 0; j < cpuc->n_events; j++) {
-		struct perf_event *pe = cpuc->event[j];
-
-		if (cpuc->current_idx[j] != PMC_NO_INDEX &&
-			cpuc->current_idx[j] != pe->hw.idx) {
-			alpha_perf_event_update(pe, &pe->hw, cpuc->current_idx[j], 0);
-			cpuc->current_idx[j] = PMC_NO_INDEX;
-		}
-	}
-
-	/* Assign to counters all unassigned events. */
-	cpuc->idx_mask = 0;
-	for (j = 0; j < cpuc->n_events; j++) {
-		struct perf_event *pe = cpuc->event[j];
-		struct hw_perf_event *hwc = &pe->hw;
-		int idx = hwc->idx;
-
-		if (cpuc->current_idx[j] == PMC_NO_INDEX) {
-			alpha_perf_event_set_period(pe, hwc, idx);
-			cpuc->current_idx[j] = idx;
-		}
-
-		if (!(hwc->state & PERF_HES_STOPPED))
-			cpuc->idx_mask |= (1<<cpuc->current_idx[j]);
-	}
-	cpuc->config = cpuc->event[0]->hw.config_base;
+	arc_unwind_core(NULL, regs, callchain_trace, &ctrl);
 }
 
-
-
-/* Schedule perf HW event on to PMU.
- *  - this function is called from outside this module via the pmu struct
- *    returned from perf event initialisation.
- */
-static int alpha_pmu_add(struct perf_event *event, int flags)
+void perf_callchain_user(struct perf_callchain_entry_ctx *entry,
+			 struct pt_regs *regs)
 {
-	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
-	struct hw_perf_event *hwc = &event->hw;
-	int n0;
-	int ret;
-	unsigned long irq_flags;
+	/*
+	 * User stack can't be unwound trivially with kernel dwarf unwinder
+	 * So for now just record the user PC
+	 */
+	perf_callchain_store(entry, instruction_pointer(regs));
+}
+
+static struct arc_pmu *arc_pmu;
+static DEFINE_PER_CPU(struct arc_pmu_cpu, arc_pmu_cpu);
+
+/* read counter #idx; note that counter# != event# on ARC! */
+static u64 arc_pmu_read_counter(int idx)
+{
+	u32 tmp;
+	u64 result;
 
 	/*
-	 * The Sparc code has the IRQ disable first followed by the perf
-	 * disable, however this can lead to an overflowed counter with the
-	 * PMI disabled on rare occasions.  The alpha_perf_event_update()
-	 * routine should detect this situation by noting a negative delta,
-	 * nevertheless we disable the PMCs first to enable a potential
-	 * final PMI to occur before we disable interrupts.
+	 * ARC supports making 'snapshots' of the counters, so we don't
+	 * need to care about counters wrapping to 0 underneath our feet
 	 */
-	perf_pmu_disable(event->pmu);
-	local_irq_save(irq_flags);
+	write_aux_reg(ARC_REG_PCT_INDEX, idx);
+	tmp = read_aux_reg(ARC_REG_PCT_CONTROL);
+	write_aux_reg(ARC_REG_PCT_CONTROL, tmp | ARC_REG_PCT_CONTROL_SN);
+	result = (u64) (read_aux_reg(ARC_REG_PCT_SNAPH)) << 32;
+	result |= read_aux_reg(ARC_REG_PCT_SNAPL);
 
-	/* Default to error to be returned */
-	ret = -EAGAIN;
+	return result;
+}
 
-	/* Insert event on to PMU and if successful modify ret to valid return */
-	n0 = cpuc->n_events;
-	if (n0 < alpha_pmu->num_pmcs) {
-		cpuc->event[n0] = event;
-		cpuc->evtype[n0] = event->hw.event_base;
-		cpuc->current_idx[n0] = PMC_NO_INDEX;
+static void arc_perf_event_update(struct perf_event *event,
+				  struct hw_perf_event *hwc, int idx)
+{
+	u64 prev_raw_count = local64_read(&hwc->prev_count);
+	u64 new_raw_count = arc_pmu_read_counter(idx);
+	s64 delta = new_raw_count - prev_raw_count;
 
-		if (!alpha_check_constraints(cpuc->event, cpuc->evtype, n0+1)) {
-			cpuc->n_events++;
-			cpuc->n_added++;
-			ret = 0;
-		}
-	}
+	/*
+	 * We aren't afraid of hwc->prev_count changing beneath our feet
+	 * because there's no way for us to re-enter this function anytime.
+	 */
+	local64_set(&hwc->prev_count, new_raw_count);
+	local64_add(delta, &event->count);
+	local64_sub(delta, &hwc->period_left);
+}
 
-	hwc->state = PERF_HES_UPTODATE;
-	if (!(flags & PERF_EF_START))
-		hwc->state |= PERF_HES_STOPPED;
+static void arc_pmu_read(struct perf_event *event)
+{
+	arc_perf_event_update(event, &event->hw, event->hw.idx);
+}
 
-	local_irq_restore(irq_flags);
-	perf_pmu_enable(event->pmu);
+static int arc_pmu_cache_event(u64 config)
+{
+	unsigned int cache_type, cache_op, cache_result;
+	int ret;
+
+	cache_type	= (config >>  0) & 0xff;
+	cache_op	= (config >>  8) & 0xff;
+	cache_result	= (config >> 16) & 0xff;
+	if (cache_type >= PERF_COUNT_HW_CACHE_MAX)
+		return -EINVAL;
+	if (cache_op >= PERF_COUNT_HW_CACHE_OP_MAX)
+		return -EINVAL;
+	if (cache_result >= PERF_COUNT_HW_CACHE_RESULT_MAX)
+		return -EINVAL;
+
+	ret = arc_pmu_cache_map[cache_type][cache_op][cache_result];
+
+	if (ret == CACHE_OP_UNSUPPORTED)
+		return -ENOENT;
+
+	pr_debug("init cache event: type/op/result %d/%d/%d with h/w %d \'%s\'\n",
+		 cache_type, cache_op, cache_result, ret,
+		 arc_pmu_ev_hw_map[ret]);
 
 	return ret;
 }
 
-
-
-/* Disable performance monitoring unit
- *  - this function is called from outside this module via the pmu struct
- *    returned from perf event initialisation.
- */
-static void alpha_pmu_del(struct perf_event *event, int flags)
-{
-	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
-	struct hw_perf_event *hwc = &event->hw;
-	unsigned long irq_flags;
-	int j;
-
-	perf_pmu_disable(event->pmu);
-	local_irq_save(irq_flags);
-
-	for (j = 0; j < cpuc->n_events; j++) {
-		if (event == cpuc->event[j]) {
-			int idx = cpuc->current_idx[j];
-
-			/* Shift remaining entries down into the existing
-			 * slot.
-			 */
-			while (++j < cpuc->n_events) {
-				cpuc->event[j - 1] = cpuc->event[j];
-				cpuc->evtype[j - 1] = cpuc->evtype[j];
-				cpuc->current_idx[j - 1] =
-					cpuc->current_idx[j];
-			}
-
-			/* Absorb the final count and turn off the event. */
-			alpha_perf_event_update(event, hwc, idx, 0);
-			perf_event_update_userpage(event);
-
-			cpuc->idx_mask &= ~(1UL<<idx);
-			cpuc->n_events--;
-			break;
-		}
-	}
-
-	local_irq_restore(irq_flags);
-	perf_pmu_enable(event->pmu);
-}
-
-
-static void alpha_pmu_read(struct perf_event *event)
+/* initializes hw_perf_event structure if event is supported */
+static int arc_pmu_event_init(struct perf_event *event)
 {
 	struct hw_perf_event *hwc = &event->hw;
+	int ret;
 
-	alpha_perf_event_update(event, hwc, hwc->idx, 0);
-}
-
-
-static void alpha_pmu_stop(struct perf_event *event, int flags)
-{
-	struct hw_perf_event *hwc = &event->hw;
-	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
-
-	if (!(hwc->state & PERF_HES_STOPPED)) {
-		cpuc->idx_mask &= ~(1UL<<hwc->idx);
-		hwc->state |= PERF_HES_STOPPED;
-	}
-
-	if ((flags & PERF_EF_UPDATE) && !(hwc->state & PERF_HES_UPTODATE)) {
-		alpha_perf_event_update(event, hwc, hwc->idx, 0);
-		hwc->state |= PERF_HES_UPTODATE;
-	}
-
-	if (cpuc->enabled)
-		wrperfmon(PERFMON_CMD_DISABLE, (1UL<<hwc->idx));
-}
-
-
-static void alpha_pmu_start(struct perf_event *event, int flags)
-{
-	struct hw_perf_event *hwc = &event->hw;
-	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
-
-	if (WARN_ON_ONCE(!(hwc->state & PERF_HES_STOPPED)))
-		return;
-
-	if (flags & PERF_EF_RELOAD) {
-		WARN_ON_ONCE(!(hwc->state & PERF_HES_UPTODATE));
-		alpha_perf_event_set_period(event, hwc, hwc->idx);
-	}
-
-	hwc->state = 0;
-
-	cpuc->idx_mask |= 1UL<<hwc->idx;
-	if (cpuc->enabled)
-		wrperfmon(PERFMON_CMD_ENABLE, (1UL<<hwc->idx));
-}
-
-
-/*
- * Check that CPU performance counters are supported.
- * - currently support EV67 and later CPUs.
- * - actually some later revisions of the EV6 have the same PMC model as the
- *     EV67 but we don't do sufficiently deep CPU detection to detect them.
- *     Bad luck to the very few people who might have one, I guess.
- */
-static int supported_cpu(void)
-{
-	struct percpu_struct *cpu;
-	unsigned long cputype;
-
-	/* Get cpu type from HW */
-	cpu = (struct percpu_struct *)((char *)hwrpb + hwrpb->processor_offset);
-	cputype = cpu->type & 0xffffffff;
-	/* Include all of EV67, EV68, EV7, EV79 and EV69 as supported. */
-	return (cputype >= EV67_CPU) && (cputype <= EV69_CPU);
-}
-
-
-
-static void hw_perf_event_destroy(struct perf_event *event)
-{
-	/* Nothing to be done! */
-	return;
-}
-
-
-
-static int __hw_perf_event_init(struct perf_event *event)
-{
-	struct perf_event_attr *attr = &event->attr;
-	struct hw_perf_event *hwc = &event->hw;
-	struct perf_event *evts[MAX_HWEVENTS];
-	unsigned long evtypes[MAX_HWEVENTS];
-	int idx_rubbish_bin[MAX_HWEVENTS];
-	int ev;
-	int n;
-
-	/* We only support a limited range of HARDWARE event types with one
-	 * only programmable via a RAW event type.
-	 */
-	if (attr->type == PERF_TYPE_HARDWARE) {
-		if (attr->config >= alpha_pmu->max_events)
-			return -EINVAL;
-		ev = alpha_pmu->event_map[attr->config];
-	} else if (attr->type == PERF_TYPE_HW_CACHE) {
-		return -EOPNOTSUPP;
-	} else if (attr->type == PERF_TYPE_RAW) {
-		if (!alpha_pmu->raw_event_valid(attr->config))
-			return -EINVAL;
-		ev = attr->config;
-	} else {
-		return -EOPNOTSUPP;
-	}
-
-	if (ev < 0) {
-		return ev;
-	}
-
-	/*
-	 * We place the event type in event_base here and leave calculation
-	 * of the codes to programme the PMU for alpha_pmu_enable() because
-	 * it is only then we will know what HW events are actually
-	 * scheduled on to the PMU.  At that point the code to programme the
-	 * PMU is put into config_base and the PMC to use is placed into
-	 * idx.  We initialise idx (below) to PMC_NO_INDEX to indicate that
-	 * it is yet to be determined.
-	 */
-	hwc->event_base = ev;
-
-	/* Collect events in a group together suitable for calling
-	 * alpha_check_constraints() to verify that the group as a whole can
-	 * be scheduled on to the PMU.
-	 */
-	n = 0;
-	if (event->group_leader != event) {
-		n = collect_events(event->group_leader,
-				alpha_pmu->num_pmcs - 1,
-				evts, evtypes, idx_rubbish_bin);
-		if (n < 0)
-			return -EINVAL;
-	}
-	evtypes[n] = hwc->event_base;
-	evts[n] = event;
-
-	if (alpha_check_constraints(evts, evtypes, n + 1))
-		return -EINVAL;
-
-	/* Indicate that PMU config and idx are yet to be determined. */
-	hwc->config_base = 0;
-	hwc->idx = PMC_NO_INDEX;
-
-	event->destroy = hw_perf_event_destroy;
-
-	/*
-	 * Most architectures reserve the PMU for their use at this point.
-	 * As there is no existing mechanism to arbitrate usage and there
-	 * appears to be no other user of the Alpha PMU we just assume
-	 * that we can just use it, hence a NO-OP here.
-	 *
-	 * Maybe an alpha_reserve_pmu() routine should be implemented but is
-	 * anything else ever going to use it?
-	 */
-
-	if (!hwc->sample_period) {
-		hwc->sample_period = alpha_pmu->pmc_max_period[0];
+	if (!is_sampling_event(event)) {
+		hwc->sample_period = arc_pmu->max_period;
 		hwc->last_period = hwc->sample_period;
 		local64_set(&hwc->period_left, hwc->sample_period);
 	}
 
-	return 0;
-}
+	hwc->config = 0;
 
-/*
- * Main entry point to initialise a HW performance event.
- */
-static int alpha_pmu_event_init(struct perf_event *event)
-{
-	int err;
+	if (is_isa_arcv2()) {
+		/* "exclude user" means "count only kernel" */
+		if (event->attr.exclude_user)
+			hwc->config |= ARC_REG_PCT_CONFIG_KERN;
 
-	/* does not support taken branch sampling */
-	if (has_branch_stack(event))
-		return -EOPNOTSUPP;
+		/* "exclude kernel" means "count only user" */
+		if (event->attr.exclude_kernel)
+			hwc->config |= ARC_REG_PCT_CONFIG_USER;
+	}
 
 	switch (event->attr.type) {
-	case PERF_TYPE_RAW:
 	case PERF_TYPE_HARDWARE:
+		if (event->attr.config >= PERF_COUNT_HW_MAX)
+			return -ENOENT;
+		if (arc_pmu->ev_hw_idx[event->attr.config] < 0)
+			return -ENOENT;
+		hwc->config |= arc_pmu->ev_hw_idx[event->attr.config];
+		pr_debug("init event %d with h/w %08x \'%s\'\n",
+			 (int)event->attr.config, (int)hwc->config,
+			 arc_pmu_ev_hw_map[event->attr.config]);
+		return 0;
+
 	case PERF_TYPE_HW_CACHE:
-		break;
+		ret = arc_pmu_cache_event(event->attr.config);
+		if (ret < 0)
+			return ret;
+		hwc->config |= arc_pmu->ev_hw_idx[ret];
+		pr_debug("init cache event with h/w %08x \'%s\'\n",
+			 (int)hwc->config, arc_pmu_ev_hw_map[ret]);
+		return 0;
+
+	case PERF_TYPE_RAW:
+		if (event->attr.config >= arc_pmu->n_events)
+			return -ENOENT;
+
+		hwc->config |= event->attr.config;
+		pr_debug("init raw event with idx %lld \'%s\'\n",
+			 event->attr.config,
+			 arc_pmu->raw_entry[event->attr.config].name);
+
+		return 0;
 
 	default:
 		return -ENOENT;
 	}
+}
 
-	if (!alpha_pmu)
-		return -ENODEV;
+/* starts all counters */
+static void arc_pmu_enable(struct pmu *pmu)
+{
+	u32 tmp;
+	tmp = read_aux_reg(ARC_REG_PCT_CONTROL);
+	write_aux_reg(ARC_REG_PCT_CONTROL, (tmp & 0xffff0000) | 0x1);
+}
 
-	/* Do the real initialisation work. */
-	err = __hw_perf_event_init(event);
+/* stops all counters */
+static void arc_pmu_disable(struct pmu *pmu)
+{
+	u32 tmp;
+	tmp = read_aux_reg(ARC_REG_PCT_CONTROL);
+	write_aux_reg(ARC_REG_PCT_CONTROL, (tmp & 0xffff0000) | 0x0);
+}
 
-	return err;
+static int arc_pmu_event_set_period(struct perf_event *event)
+{
+	struct hw_perf_event *hwc = &event->hw;
+	s64 left = local64_read(&hwc->period_left);
+	s64 period = hwc->sample_period;
+	int idx = hwc->idx;
+	int overflow = 0;
+	u64 value;
+
+	if (unlikely(left <= -period)) {
+		/* left underflowed by more than period. */
+		left = period;
+		local64_set(&hwc->period_left, left);
+		hwc->last_period = period;
+		overflow = 1;
+	} else if (unlikely(left <= 0)) {
+		/* left underflowed by less than period. */
+		left += period;
+		local64_set(&hwc->period_left, left);
+		hwc->last_period = period;
+		overflow = 1;
+	}
+
+	if (left > arc_pmu->max_period)
+		left = arc_pmu->max_period;
+
+	value = arc_pmu->max_period - left;
+	local64_set(&hwc->prev_count, value);
+
+	/* Select counter */
+	write_aux_reg(ARC_REG_PCT_INDEX, idx);
+
+	/* Write value */
+	write_aux_reg(ARC_REG_PCT_COUNTL, lower_32_bits(value));
+	write_aux_reg(ARC_REG_PCT_COUNTH, upper_32_bits(value));
+
+	perf_event_update_userpage(event);
+
+	return overflow;
 }
 
 /*
- * Main entry point - enable HW performance counters.
+ * Assigns hardware counter to hardware condition.
+ * Note that there is no separate start/stop mechanism;
+ * stopping is achieved by assigning the 'never' condition
  */
-static void alpha_pmu_enable(struct pmu *pmu)
+static void arc_pmu_start(struct perf_event *event, int flags)
 {
-	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
+	struct hw_perf_event *hwc = &event->hw;
+	int idx = hwc->idx;
 
-	if (cpuc->enabled)
+	if (WARN_ON_ONCE(idx == -1))
 		return;
 
-	cpuc->enabled = 1;
-	barrier();
+	if (flags & PERF_EF_RELOAD)
+		WARN_ON_ONCE(!(hwc->state & PERF_HES_UPTODATE));
 
-	if (cpuc->n_events > 0) {
-		/* Update cpuc with information from any new scheduled events. */
-		maybe_change_configuration(cpuc);
+	hwc->state = 0;
 
-		/* Start counting the desired events. */
-		wrperfmon(PERFMON_CMD_LOGGING_OPTIONS, EV67_PCTR_MODE_AGGREGATE);
-		wrperfmon(PERFMON_CMD_DESIRED_EVENTS, cpuc->config);
-		wrperfmon(PERFMON_CMD_ENABLE, cpuc->idx_mask);
+	arc_pmu_event_set_period(event);
+
+	/* Enable interrupt for this counter */
+	if (is_sampling_event(event))
+		write_aux_reg(ARC_REG_PCT_INT_CTRL,
+			      read_aux_reg(ARC_REG_PCT_INT_CTRL) | BIT(idx));
+
+	/* enable ARC pmu here */
+	write_aux_reg(ARC_REG_PCT_INDEX, idx);		/* counter # */
+	write_aux_reg(ARC_REG_PCT_CONFIG, hwc->config);	/* condition */
+}
+
+static void arc_pmu_stop(struct perf_event *event, int flags)
+{
+	struct hw_perf_event *hwc = &event->hw;
+	int idx = hwc->idx;
+
+	/* Disable interrupt for this counter */
+	if (is_sampling_event(event)) {
+		/*
+		 * Reset interrupt flag by writing of 1. This is required
+		 * to make sure pending interrupt was not left.
+		 */
+		write_aux_reg(ARC_REG_PCT_INT_ACT, BIT(idx));
+		write_aux_reg(ARC_REG_PCT_INT_CTRL,
+			      read_aux_reg(ARC_REG_PCT_INT_CTRL) & ~BIT(idx));
+	}
+
+	if (!(event->hw.state & PERF_HES_STOPPED)) {
+		/* stop hw counter here */
+		write_aux_reg(ARC_REG_PCT_INDEX, idx);
+
+		/* condition code #0 is always "never" */
+		write_aux_reg(ARC_REG_PCT_CONFIG, 0);
+
+		event->hw.state |= PERF_HES_STOPPED;
+	}
+
+	if ((flags & PERF_EF_UPDATE) &&
+	    !(event->hw.state & PERF_HES_UPTODATE)) {
+		arc_perf_event_update(event, &event->hw, idx);
+		event->hw.state |= PERF_HES_UPTODATE;
 	}
 }
 
-
-/*
- * Main entry point - disable HW performance counters.
- */
-
-static void alpha_pmu_disable(struct pmu *pmu)
+static void arc_pmu_del(struct perf_event *event, int flags)
 {
-	struct cpu_hw_events *cpuc = this_cpu_ptr(&cpu_hw_events);
+	struct arc_pmu_cpu *pmu_cpu = this_cpu_ptr(&arc_pmu_cpu);
 
-	if (!cpuc->enabled)
-		return;
+	arc_pmu_stop(event, PERF_EF_UPDATE);
+	__clear_bit(event->hw.idx, pmu_cpu->used_mask);
 
-	cpuc->enabled = 0;
-	cpuc->n_added = 0;
+	pmu_cpu->act_counter[event->hw.idx] = 0;
 
-	wrperfmon(PERFMON_CMD_DISABLE, cpuc->idx_mask);
+	perf_event_update_userpage(event);
 }
 
-static struct pmu pmu = {
-	.pmu_enable	= alpha_pmu_enable,
-	.pmu_disable	= alpha_pmu_disable,
-	.event_init	= alpha_pmu_event_init,
-	.add		= alpha_pmu_add,
-	.del		= alpha_pmu_del,
-	.start		= alpha_pmu_start,
-	.stop		= alpha_pmu_stop,
-	.read		= alpha_pmu_read,
-	.capabilities	= PERF_PMU_CAP_NO_EXCLUDE,
-};
-
-
-/*
- * Main entry point - don't know when this is called but it
- * obviously dumps debug info.
- */
-void perf_event_print_debug(void)
+/* allocate hardware counter and optionally start counting */
+static int arc_pmu_add(struct perf_event *event, int flags)
 {
-	unsigned long flags;
-	unsigned long pcr;
-	int pcr0, pcr1;
-	int cpu;
+	struct arc_pmu_cpu *pmu_cpu = this_cpu_ptr(&arc_pmu_cpu);
+	struct hw_perf_event *hwc = &event->hw;
+	int idx;
 
-	if (!supported_cpu())
-		return;
+	idx = ffz(pmu_cpu->used_mask[0]);
+	if (idx == arc_pmu->n_counters)
+		return -EAGAIN;
 
-	local_irq_save(flags);
+	__set_bit(idx, pmu_cpu->used_mask);
+	hwc->idx = idx;
 
-	cpu = smp_processor_id();
+	write_aux_reg(ARC_REG_PCT_INDEX, idx);
 
-	pcr = wrperfmon(PERFMON_CMD_READ, 0);
-	pcr0 = (pcr >> alpha_pmu->pmc_count_shift[0]) & alpha_pmu->pmc_count_mask[0];
-	pcr1 = (pcr >> alpha_pmu->pmc_count_shift[1]) & alpha_pmu->pmc_count_mask[1];
+	pmu_cpu->act_counter[idx] = event;
 
-	pr_info("CPU#%d: PCTR0[%06x] PCTR1[%06x]\n", cpu, pcr0, pcr1);
-
-	local_irq_restore(flags);
-}
-
-
-/*
- * Performance Monitoring Interrupt Service Routine called when a PMC
- * overflows.  The PMC that overflowed is passed in la_ptr.
- */
-static void alpha_perf_event_irq_handler(unsigned long la_ptr,
-					struct pt_regs *regs)
-{
-	struct cpu_hw_events *cpuc;
-	struct perf_sample_data data;
-	struct perf_event *event;
-	struct hw_perf_event *hwc;
-	int idx, j;
-
-	__this_cpu_inc(irq_pmi_count);
-	cpuc = this_cpu_ptr(&cpu_hw_events);
-
-	/* Completely counting through the PMC's period to trigger a new PMC
-	 * overflow interrupt while in this interrupt routine is utterly
-	 * disastrous!  The EV6 and EV67 counters are sufficiently large to
-	 * prevent this but to be really sure disable the PMCs.
-	 */
-	wrperfmon(PERFMON_CMD_DISABLE, cpuc->idx_mask);
-
-	/* la_ptr is the counter that overflowed. */
-	if (unlikely(la_ptr >= alpha_pmu->num_pmcs)) {
-		/* This should never occur! */
-		irq_err_count++;
-		pr_warn("PMI: silly index %ld\n", la_ptr);
-		wrperfmon(PERFMON_CMD_ENABLE, cpuc->idx_mask);
-		return;
+	if (is_sampling_event(event)) {
+		/* Mimic full counter overflow as other arches do */
+		write_aux_reg(ARC_REG_PCT_INT_CNTL,
+			      lower_32_bits(arc_pmu->max_period));
+		write_aux_reg(ARC_REG_PCT_INT_CNTH,
+			      upper_32_bits(arc_pmu->max_period));
 	}
 
-	idx = la_ptr;
+	write_aux_reg(ARC_REG_PCT_CONFIG, 0);
+	write_aux_reg(ARC_REG_PCT_COUNTL, 0);
+	write_aux_reg(ARC_REG_PCT_COUNTH, 0);
+	local64_set(&hwc->prev_count, 0);
 
-	for (j = 0; j < cpuc->n_events; j++) {
-		if (cpuc->current_idx[j] == idx)
-			break;
-	}
+	hwc->state = PERF_HES_UPTODATE | PERF_HES_STOPPED;
+	if (flags & PERF_EF_START)
+		arc_pmu_start(event, PERF_EF_RELOAD);
 
-	if (unlikely(j == cpuc->n_events)) {
-		/* This can occur if the event is disabled right on a PMC overflow. */
-		wrperfmon(PERFMON_CMD_ENABLE, cpuc->idx_mask);
-		return;
-	}
-
-	event = cpuc->event[j];
-
-	if (unlikely(!event)) {
-		/* This should never occur! */
-		irq_err_count++;
-		pr_warn("PMI: No event at index %d!\n", idx);
-		wrperfmon(PERFMON_CMD_ENABLE, cpuc->idx_mask);
-		return;
-	}
-
-	hwc = &event->hw;
-	alpha_perf_event_update(event, hwc, idx, alpha_pmu->pmc_max_period[idx]+1);
-	perf_sample_data_init(&data, 0, hwc->last_period);
-
-	if (alpha_perf_event_set_period(event, hwc, idx)) {
-		if (perf_event_overflow(event, &data, regs)) {
-			/* Interrupts coming too quickly; "throttle" the
-			 * counter, i.e., disable it for a little while.
-			 */
-			alpha_pmu_stop(event, 0);
-		}
-	}
-	wrperfmon(PERFMON_CMD_ENABLE, cpuc->idx_mask);
-
-	return;
-}
-
-
-
-/*
- * Init call to initialise performance events at kernel startup.
- */
-int __init init_hw_perf_events(void)
-{
-	pr_info("Performance events: ");
-
-	if (!supported_cpu()) {
-		pr_cont("No support for your CPU.\n");
-		return 0;
-	}
-
-	pr_cont("Supported CPU type!\n");
-
-	/* Override performance counter IRQ vector */
-
-	perf_irq = alpha_perf_event_irq_handler;
-
-	/* And set up PMU specification */
-	alpha_pmu = &ev67_pmu;
-
-	perf_pmu_register(&pmu, "cpu", PERF_TYPE_RAW);
+	perf_event_update_userpage(event);
 
 	return 0;
 }
-early_initcall(init_hw_perf_events);
+
+#ifdef CONFIG_ISA_ARCV2
+static irqreturn_t arc_pmu_intr(int irq, void *dev)
+{
+	struct perf_sample_data data;
+	struct arc_pmu_cpu *pmu_cpu = this_cpu_ptr(&arc_pmu_cpu);
+	struct pt_regs *regs;
+	unsigned int active_ints;
+	int idx;
+
+	arc_pmu_disable(&arc_pmu->pmu);
+
+	active_ints = read_aux_reg(ARC_REG_PCT_INT_ACT);
+	if (!active_ints)
+		goto done;
+
+	regs = get_irq_regs();
+
+	do {
+		struct perf_event *event;
+		struct hw_perf_event *hwc;
+
+		idx = __ffs(active_ints);
+
+		/* Reset interrupt flag by writing of 1 */
+		write_aux_reg(ARC_REG_PCT_INT_ACT, BIT(idx));
+
+		/*
+		 * On reset of "interrupt active" bit corresponding
+		 * "interrupt enable" bit gets automatically reset as well.
+		 * Now we need to re-enable interrupt for the counter.
+		 */
+		write_aux_reg(ARC_REG_PCT_INT_CTRL,
+			read_aux_reg(ARC_REG_PCT_INT_CTRL) | BIT(idx));
+
+		event = pmu_cpu->act_counter[idx];
+		hwc = &event->hw;
+
+		WARN_ON_ONCE(hwc->idx != idx);
+
+		arc_perf_event_update(event, &event->hw, event->hw.idx);
+		perf_sample_data_init(&data, 0, hwc->last_period);
+		if (arc_pmu_event_set_period(event)) {
+			if (perf_event_overflow(event, &data, regs))
+				arc_pmu_stop(event, 0);
+		}
+
+		active_ints &= ~BIT(idx);
+	} while (active_ints);
+
+done:
+	arc_pmu_enable(&arc_pmu->pmu);
+
+	return IRQ_HANDLED;
+}
+#else
+
+static irqreturn_t arc_pmu_intr(int irq, void *dev)
+{
+	return IRQ_NONE;
+}
+
+#endif /* CONFIG_ISA_ARCV2 */
+
+static void arc_cpu_pmu_irq_init(void *data)
+{
+	int irq = *(int *)data;
+
+	enable_percpu_irq(irq, IRQ_TYPE_NONE);
+
+	/* Clear all pending interrupt flags */
+	write_aux_reg(ARC_REG_PCT_INT_ACT, 0xffffffff);
+}
+
+/* Event field occupies the bottom 15 bits of our config field */
+PMU_FORMAT_ATTR(event, "config:0-14");
+static struct attribute *arc_pmu_format_attrs[] = {
+	&format_attr_event.attr,
+	NULL,
+};
+
+static struct attribute_group arc_pmu_format_attr_gr = {
+	.name = "format",
+	.attrs = arc_pmu_format_attrs,
+};
+
+static ssize_t arc_pmu_events_sysfs_show(struct device *dev,
+					 struct device_attribute *attr,
+					 char *page)
+{
+	struct perf_pmu_events_attr *pmu_attr;
+
+	pmu_attr = container_of(attr, struct perf_pmu_events_attr, attr);
+	return sprintf(page, "event=0x%04llx\n", pmu_attr->id);
+}
+
+/*
+ * We don't add attrs here as we don't have pre-defined list of perf events.
+ * We will generate and add attrs dynamically in probe() after we read HW
+ * configuration.
+ */
+static struct attribute_group arc_pmu_events_attr_gr = {
+	.name = "events",
+};
+
+static void arc_pmu_add_raw_event_attr(int j, char *str)
+{
+	memmove(arc_pmu->raw_entry[j].name, str, ARCPMU_EVENT_NAME_LEN - 1);
+	arc_pmu->attr[j].attr.attr.name = arc_pmu->raw_entry[j].name;
+	arc_pmu->attr[j].attr.attr.mode = VERIFY_OCTAL_PERMISSIONS(0444);
+	arc_pmu->attr[j].attr.show = arc_pmu_events_sysfs_show;
+	arc_pmu->attr[j].id = j;
+	arc_pmu->attrs[j] = &(arc_pmu->attr[j].attr.attr);
+}
+
+static int arc_pmu_raw_alloc(struct device *dev)
+{
+	arc_pmu->attr = devm_kmalloc_array(dev, arc_pmu->n_events + 1,
+		sizeof(*arc_pmu->attr), GFP_KERNEL | __GFP_ZERO);
+	if (!arc_pmu->attr)
+		return -ENOMEM;
+
+	arc_pmu->attrs = devm_kmalloc_array(dev, arc_pmu->n_events + 1,
+		sizeof(*arc_pmu->attrs), GFP_KERNEL | __GFP_ZERO);
+	if (!arc_pmu->attrs)
+		return -ENOMEM;
+
+	arc_pmu->raw_entry = devm_kmalloc_array(dev, arc_pmu->n_events,
+		sizeof(*arc_pmu->raw_entry), GFP_KERNEL | __GFP_ZERO);
+	if (!arc_pmu->raw_entry)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static inline bool event_in_hw_event_map(int i, char *name)
+{
+	if (!arc_pmu_ev_hw_map[i])
+		return false;
+
+	if (!strlen(arc_pmu_ev_hw_map[i]))
+		return false;
+
+	if (strcmp(arc_pmu_ev_hw_map[i], name))
+		return false;
+
+	return true;
+}
+
+static void arc_pmu_map_hw_event(int j, char *str)
+{
+	int i;
+
+	/* See if HW condition has been mapped to a perf event_id */
+	for (i = 0; i < ARRAY_SIZE(arc_pmu_ev_hw_map); i++) {
+		if (event_in_hw_event_map(i, str)) {
+			pr_debug("mapping perf event %2d to h/w event \'%8s\' (idx %d)\n",
+				 i, str, j);
+			arc_pmu->ev_hw_idx[i] = j;
+		}
+	}
+}
+
+static int arc_pmu_device_probe(struct platform_device *pdev)
+{
+	struct arc_reg_pct_build pct_bcr;
+	struct arc_reg_cc_build cc_bcr;
+	int i, has_interrupts, irq = -1;
+	int counter_size;	/* in bits */
+
+	union cc_name {
+		struct {
+			u32 word0, word1;
+			char sentinel;
+		} indiv;
+		char str[ARCPMU_EVENT_NAME_LEN];
+	} cc_name;
+
+
+	READ_BCR(ARC_REG_PCT_BUILD, pct_bcr);
+	if (!pct_bcr.v) {
+		pr_err("This core does not have performance counters!\n");
+		return -ENODEV;
+	}
+	BUILD_BUG_ON(ARC_PERF_MAX_COUNTERS > 32);
+	if (WARN_ON(pct_bcr.c > ARC_PERF_MAX_COUNTERS))
+		return -EINVAL;
+
+	READ_BCR(ARC_REG_CC_BUILD, cc_bcr);
+	if (WARN(!cc_bcr.v, "Counters exist but No countable conditions?"))
+		return -EINVAL;
+
+	arc_pmu = devm_kzalloc(&pdev->dev, sizeof(struct arc_pmu), GFP_KERNEL);
+	if (!arc_pmu)
+		return -ENOMEM;
+
+	arc_pmu->n_events = cc_bcr.c;
+
+	if (arc_pmu_raw_alloc(&pdev->dev))
+		return -ENOMEM;
+
+	has_interrupts = is_isa_arcv2() ? pct_bcr.i : 0;
+
+	arc_pmu->n_counters = pct_bcr.c;
+	counter_size = 32 + (pct_bcr.s << 4);
+
+	arc_pmu->max_period = (1ULL << counter_size) / 2 - 1ULL;
+
+	pr_info("ARC perf\t: %d counters (%d bits), %d conditions%s\n",
+		arc_pmu->n_counters, counter_size, cc_bcr.c,
+		has_interrupts ? ", [overflow IRQ support]" : "");
+
+	cc_name.str[ARCPMU_EVENT_NAME_LEN - 1] = 0;
+	for (i = 0; i < PERF_COUNT_ARC_HW_MAX; i++)
+		arc_pmu->ev_hw_idx[i] = -1;
+
+	/* loop thru all available h/w condition indexes */
+	for (i = 0; i < cc_bcr.c; i++) {
+		write_aux_reg(ARC_REG_CC_INDEX, i);
+		cc_name.indiv.word0 = le32_to_cpu(read_aux_reg(ARC_REG_CC_NAME0));
+		cc_name.indiv.word1 = le32_to_cpu(read_aux_reg(ARC_REG_CC_NAME1));
+
+		arc_pmu_map_hw_event(i, cc_name.str);
+		arc_pmu_add_raw_event_attr(i, cc_name.str);
+	}
+
+	arc_pmu_events_attr_gr.attrs = arc_pmu->attrs;
+	arc_pmu->attr_groups[ARCPMU_ATTR_GR_EVENTS] = &arc_pmu_events_attr_gr;
+	arc_pmu->attr_groups[ARCPMU_ATTR_GR_FORMATS] = &arc_pmu_format_attr_gr;
+
+	arc_pmu->pmu = (struct pmu) {
+		.pmu_enable	= arc_pmu_enable,
+		.pmu_disable	= arc_pmu_disable,
+		.event_init	= arc_pmu_event_init,
+		.add		= arc_pmu_add,
+		.del		= arc_pmu_del,
+		.start		= arc_pmu_start,
+		.stop		= arc_pmu_stop,
+		.read		= arc_pmu_read,
+		.attr_groups	= arc_pmu->attr_groups,
+	};
+
+	if (has_interrupts) {
+		irq = platform_get_irq(pdev, 0);
+		if (irq >= 0) {
+			int ret;
+
+			arc_pmu->irq = irq;
+
+			/* intc map function ensures irq_set_percpu_devid() called */
+			ret = request_percpu_irq(irq, arc_pmu_intr, "ARC perf counters",
+						 this_cpu_ptr(&arc_pmu_cpu));
+
+			if (!ret)
+				on_each_cpu(arc_cpu_pmu_irq_init, &irq, 1);
+			else
+				irq = -1;
+		}
+
+	}
+
+	if (irq == -1)
+		arc_pmu->pmu.capabilities |= PERF_PMU_CAP_NO_INTERRUPT;
+
+	/*
+	 * perf parser doesn't really like '-' symbol in events name, so let's
+	 * use '_' in arc pct name as it goes to kernel PMU event prefix.
+	 */
+	return perf_pmu_register(&arc_pmu->pmu, "arc_pct", PERF_TYPE_RAW);
+}
+
+static const struct of_device_id arc_pmu_match[] = {
+	{ .compatible = "snps,arc700-pct" },
+	{ .compatible = "snps,archs-pct" },
+	{},
+};
+MODULE_DEVICE_TABLE(of, arc_pmu_match);
+
+static struct platform_driver arc_pmu_driver = {
+	.driver	= {
+		.name		= "arc-pct",
+		.of_match_table = of_match_ptr(arc_pmu_match),
+	},
+	.probe		= arc_pmu_device_probe,
+};
+
+module_platform_driver(arc_pmu_driver);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Mischa Jonker <mjonker@synopsys.com>");
+MODULE_DESCRIPTION("ARC PMU driver");

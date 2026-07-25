@@ -1,103 +1,274 @@
-// SPDX-License-Identifier: GPL-2.0
-#include <linux/kernel.h>
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ *	stacktrace.c : stacktracing APIs needed by rest of kernel
+ *			(wrappers over ARC dwarf based unwinder)
+ *
+ * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
+ *
+ *  vineetg: aug 2009
+ *  -Implemented CONFIG_STACKTRACE APIs, primarily save_stack_trace_tsk( )
+ *   for displaying task's kernel mode call stack in /proc/<pid>/stack
+ *  -Iterator based approach to have single copy of unwinding core and APIs
+ *   needing unwinding, implement the logic in iterator regarding:
+ *      = which frame onwards to start capture
+ *      = which frame to stop capturing (wchan)
+ *      = specifics of data structs where trace is saved(CONFIG_STACKTRACE etc)
+ *
+ *  vineetg: March 2009
+ *  -Implemented correct versions of thread_saved_pc() and __get_wchan()
+ *
+ *  rajeshwarr: 2008
+ *  -Initial implementation
+ */
 
-typedef unsigned int instr;
+#include <linux/ptrace.h>
+#include <linux/export.h>
+#include <linux/stacktrace.h>
+#include <linux/kallsyms.h>
+#include <linux/sched/debug.h>
 
-#define MAJOR_OP	0xfc000000
-#define LDA_OP		0x20000000
-#define STQ_OP		0xb4000000
-#define BR_OP		0xc0000000
+#include <asm/arcregs.h>
+#include <asm/unwind.h>
+#include <asm/switch_to.h>
 
-#define STK_ALLOC_1	0x23de8000 /* lda $30,-X($30) */
-#define STK_ALLOC_1M	0xffff8000
-#define STK_ALLOC_2	0x43c0153e /* subq $30,X,$30 */
-#define STK_ALLOC_2M	0xffe01fff
+/*-------------------------------------------------------------------------
+ *              Unwinder Iterator
+ *-------------------------------------------------------------------------
+ */
 
-#define MEM_REG		0x03e00000
-#define MEM_BASE	0x001f0000
-#define MEM_OFF		0x0000ffff
-#define MEM_OFF_SIGN	0x00008000
-#define	BASE_SP		0x001e0000
+#ifdef CONFIG_ARC_DW2_UNWIND
 
-#define STK_ALLOC_MATCH(INSTR)			\
-  (((INSTR) & STK_ALLOC_1M) == STK_ALLOC_1	\
-   || ((INSTR) & STK_ALLOC_2M) == STK_ALLOC_2)
-#define STK_PUSH_MATCH(INSTR) \
-  (((INSTR) & (MAJOR_OP | MEM_BASE | MEM_OFF_SIGN)) == (STQ_OP | BASE_SP))
-#define MEM_OP_OFFSET(INSTR) \
-  (((long)((INSTR) & MEM_OFF) << 48) >> 48)
-#define MEM_OP_REG(INSTR) \
-  (((INSTR) & MEM_REG) >> 22)
-
-/* Branches, jumps, PAL calls, and illegal opcodes end a basic block. */
-#define BB_END(INSTR)						\
-  (((instr)(INSTR) >= BR_OP) | ((instr)(INSTR) < LDA_OP) |	\
-   ((((instr)(INSTR) ^ 0x60000000) < 0x20000000) &		\
-    (((instr)(INSTR) & 0x0c000000) != 0)))
-
-#define IS_KERNEL_TEXT(PC) ((unsigned long)(PC) > START_ADDR)
-
-static char reg_name[][4] = {
-	"v0 ", "t0 ", "t1 ", "t2 ", "t3 ", "t4 ", "t5 ", "t6 ", "t7 ",
-	"s0 ", "s1 ", "s2 ", "s3 ", "s4 ", "s5 ", "s6 ", "a0 ", "a1 ",
-	"a2 ", "a3 ", "a4 ", "a5 ", "t8 ", "t9 ", "t10", "t11", "ra ",
-	"pv ", "at ", "gp ", "sp ", "0"
-};
-
-
-static instr *
-display_stored_regs(instr * pro_pc, unsigned char * sp)
+static int
+seed_unwind_frame_info(struct task_struct *tsk, struct pt_regs *regs,
+		       struct unwind_frame_info *frame_info)
 {
-	instr * ret_pc = 0;
-	int reg;
-	unsigned long value;
+	if (regs) {
+		/*
+		 * Asynchronous unwinding of intr/exception
+		 *  - Just uses the pt_regs passed
+		 */
+		frame_info->task = tsk;
 
-	printk("Prologue [<%p>], Frame %p:\n", pro_pc, sp);
-	while (!BB_END(*pro_pc))
-		if (STK_PUSH_MATCH(*pro_pc)) {
-			reg = (*pro_pc & MEM_REG) >> 21;
-			value = *(unsigned long *)(sp + (*pro_pc & MEM_OFF));
-			if (reg == 26)
-				ret_pc = (instr *)value;
-			printk("\t\t%s / 0x%016lx\n", reg_name[reg], value);
+		frame_info->regs.r27 = regs->fp;
+		frame_info->regs.r28 = regs->sp;
+		frame_info->regs.r31 = regs->blink;
+		frame_info->regs.r63 = regs->ret;
+		frame_info->call_frame = 0;
+	} else if (tsk == NULL || tsk == current) {
+		/*
+		 * synchronous unwinding (e.g. dump_stack)
+		 *  - uses current values of SP and friends
+		 */
+		unsigned long fp, sp, blink, ret;
+		frame_info->task = current;
+
+		__asm__ __volatile__(
+			"mov %0,r27\n\t"
+			"mov %1,r28\n\t"
+			"mov %2,r31\n\t"
+			"mov %3,r63\n\t"
+			: "=r"(fp), "=r"(sp), "=r"(blink), "=r"(ret)
+		);
+
+		frame_info->regs.r27 = fp;
+		frame_info->regs.r28 = sp;
+		frame_info->regs.r31 = blink;
+		frame_info->regs.r63 = ret;
+		frame_info->call_frame = 0;
+	} else {
+		/*
+		 * Asynchronous unwinding of a likely sleeping task
+		 *  - first ensure it is actually sleeping
+		 *  - if so, it will be in __switch_to, kernel mode SP of task
+		 *    is safe-kept and BLINK at a well known location in there
+		 */
+
+		if (task_is_running(tsk))
+			return -1;
+
+		frame_info->task = tsk;
+
+		frame_info->regs.r27 = TSK_K_FP(tsk);
+		frame_info->regs.r28 = TSK_K_ESP(tsk);
+		frame_info->regs.r31 = TSK_K_BLINK(tsk);
+		frame_info->regs.r63 = (unsigned int)__switch_to;
+
+		/* In the prologue of __switch_to, first FP is saved on stack
+		 * and then SP is copied to FP. Dwarf assumes cfa as FP based
+		 * but we didn't save FP. The value retrieved above is FP's
+		 * state in previous frame.
+		 * As a work around for this, we unwind from __switch_to start
+		 * and adjust SP accordingly. The other limitation is that
+		 * __switch_to macro is dwarf rules are not generated for inline
+		 * assembly code
+		 */
+		frame_info->regs.r27 = 0;
+		frame_info->regs.r28 += 60;
+		frame_info->call_frame = 0;
+
+	}
+	return 0;
+}
+
+#endif
+
+notrace noinline unsigned int
+arc_unwind_core(struct task_struct *tsk, struct pt_regs *regs,
+		int (*consumer_fn) (unsigned int, void *), void *arg)
+{
+#ifdef CONFIG_ARC_DW2_UNWIND
+	int ret = 0, cnt = 0;
+	unsigned int address;
+	struct unwind_frame_info frame_info;
+
+	if (seed_unwind_frame_info(tsk, regs, &frame_info))
+		return 0;
+
+	while (1) {
+		address = UNW_PC(&frame_info);
+
+		if (!address || !__kernel_text_address(address))
+			break;
+
+		if (consumer_fn(address, arg) == -1)
+			break;
+
+		ret = arc_unwind(&frame_info);
+		if (ret)
+			break;
+
+		frame_info.regs.r63 = frame_info.regs.r31;
+
+		if (cnt++ > 128) {
+			printk("unwinder looping too long, aborting !\n");
+			return 0;
 		}
-	return ret_pc;
+	}
+
+	return address;		/* return the last address it saw */
+#else
+	/* On ARC, only Dward based unwinder works. fp based backtracing is
+	 * not possible (-fno-omit-frame-pointer) because of the way function
+	 * prologue is setup (callee regs saved and then fp set and not other
+	 * way around
+	 */
+	pr_warn_once("CONFIG_ARC_DW2_UNWIND needs to be enabled\n");
+	return 0;
+
+#endif
 }
 
-static instr *
-seek_prologue(instr * pc)
+/*-------------------------------------------------------------------------
+ * callbacks called by unwinder iterator to implement kernel APIs
+ *
+ * The callback can return -1 to force the iterator to stop, which by default
+ * keeps going till the bottom-most frame.
+ *-------------------------------------------------------------------------
+ */
+
+/* Call-back which plugs into unwinding core to dump the stack in
+ * case of panic/OOPs/BUG etc
+ */
+static int __print_sym(unsigned int address, void *arg)
 {
-	while (!STK_ALLOC_MATCH(*pc))
-		--pc;
-	while (!BB_END(*(pc - 1)))
-		--pc;
-	return pc;
+	const char *loglvl = arg;
+
+	printk("%s  %pS\n", loglvl, (void *)address);
+	return 0;
 }
 
-static long
-stack_increment(instr * prologue_pc)
-{
-	while (!STK_ALLOC_MATCH(*prologue_pc))
-		++prologue_pc;
+#ifdef CONFIG_STACKTRACE
 
-	/* Count the bytes allocated. */
-	if ((*prologue_pc & STK_ALLOC_1M) == STK_ALLOC_1M)
-		return -(((long)(*prologue_pc) << 48) >> 48);
+/* Call-back which plugs into unwinding core to capture the
+ * traces needed by kernel on /proc/<pid>/stack
+ */
+static int __collect_all(unsigned int address, void *arg)
+{
+	struct stack_trace *trace = arg;
+
+	if (trace->skip > 0)
+		trace->skip--;
 	else
-		return (*prologue_pc >> 13) & 0xff;
+		trace->entries[trace->nr_entries++] = address;
+
+	if (trace->nr_entries >= trace->max_entries)
+		return -1;
+
+	return 0;
 }
 
-void
-stacktrace(void)
+static int __collect_all_but_sched(unsigned int address, void *arg)
 {
-	instr * ret_pc;
-	instr * prologue = (instr *)stacktrace;
-	register unsigned char * sp __asm__ ("$30");
+	struct stack_trace *trace = arg;
 
-	printk("\tstack trace:\n");
-	do {
-		ret_pc = display_stored_regs(prologue, sp);
-		sp += stack_increment(prologue);
-		prologue = seek_prologue(ret_pc);
-	} while (IS_KERNEL_TEXT(ret_pc));
+	if (in_sched_functions(address))
+		return 0;
+
+	if (trace->skip > 0)
+		trace->skip--;
+	else
+		trace->entries[trace->nr_entries++] = address;
+
+	if (trace->nr_entries >= trace->max_entries)
+		return -1;
+
+	return 0;
 }
+
+#endif
+
+static int __get_first_nonsched(unsigned int address, void *unused)
+{
+	if (in_sched_functions(address))
+		return 0;
+
+	return -1;
+}
+
+/*-------------------------------------------------------------------------
+ *              APIs expected by various kernel sub-systems
+ *-------------------------------------------------------------------------
+ */
+
+noinline void show_stacktrace(struct task_struct *tsk, struct pt_regs *regs,
+			      const char *loglvl)
+{
+	printk("%s\nStack Trace:\n", loglvl);
+	arc_unwind_core(tsk, regs, __print_sym, (void *)loglvl);
+}
+EXPORT_SYMBOL(show_stacktrace);
+
+/* Expected by sched Code */
+void show_stack(struct task_struct *tsk, unsigned long *sp, const char *loglvl)
+{
+	show_stacktrace(tsk, NULL, loglvl);
+}
+
+/* Another API expected by schedular, shows up in "ps" as Wait Channel
+ * Of course just returning schedule( ) would be pointless so unwind until
+ * the function is not in schedular code
+ */
+unsigned int __get_wchan(struct task_struct *tsk)
+{
+	return arc_unwind_core(tsk, NULL, __get_first_nonsched, NULL);
+}
+
+#ifdef CONFIG_STACKTRACE
+
+/*
+ * API required by CONFIG_STACKTRACE, CONFIG_LATENCYTOP.
+ * A typical use is when /proc/<pid>/stack is queried by userland
+ */
+void save_stack_trace_tsk(struct task_struct *tsk, struct stack_trace *trace)
+{
+	/* Assumes @tsk is sleeping so unwinds from __switch_to */
+	arc_unwind_core(tsk, NULL, __collect_all_but_sched, trace);
+}
+
+void save_stack_trace(struct stack_trace *trace)
+{
+	/* Pass NULL for task so it unwinds the current call frame */
+	arc_unwind_core(NULL, NULL, __collect_all, trace);
+}
+EXPORT_SYMBOL_GPL(save_stack_trace);
+#endif

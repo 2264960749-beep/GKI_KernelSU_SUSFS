@@ -1,123 +1,51 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- *	linux/arch/alpha/kernel/irq.c
- *
- *	Copyright (C) 1995 Linus Torvalds
- *
- * This file contains the code used by various IRQ handling routines:
- * asking for different IRQ's should be done through these routines
- * instead of just grabbing them. Thus setups with different IRQ numbers
- * shouldn't result in any weird surprises, and installing new handlers
- * should be easier.
+ * Copyright (C) 2011-12 Synopsys, Inc. (www.synopsys.com)
  */
 
-#include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/errno.h>
-#include <linux/kernel_stat.h>
-#include <linux/signal.h>
-#include <linux/sched.h>
-#include <linux/ptrace.h>
 #include <linux/interrupt.h>
-#include <linux/random.h>
-#include <linux/irq.h>
-#include <linux/proc_fs.h>
-#include <linux/seq_file.h>
-#include <linux/profile.h>
-#include <linux/bitops.h>
+#include <linux/irqchip.h>
+#include <asm/mach_desc.h>
 
-#include <asm/io.h>
-#include <linux/uaccess.h>
+#include <asm/irq_regs.h>
+#include <asm/smp.h>
 
-volatile unsigned long irq_err_count;
-DEFINE_PER_CPU(unsigned long, irq_pmi_count);
-
-void ack_bad_irq(unsigned int irq)
+/*
+ * Late Interrupt system init called from start_kernel for Boot CPU only
+ *
+ * Since slab must already be initialized, platforms can start doing any
+ * needed request_irq( )s
+ */
+void __init init_IRQ(void)
 {
-	irq_err_count++;
-	printk(KERN_CRIT "Unexpected IRQ trap at vector %u\n", irq);
-}
-
-#ifdef CONFIG_SMP 
-static char irq_user_affinity[NR_IRQS];
-
-int irq_select_affinity(unsigned int irq)
-{
-	struct irq_data *data = irq_get_irq_data(irq);
-	struct irq_chip *chip;
-	static int last_cpu;
-	int cpu = last_cpu + 1;
-
-	if (!data)
-		return 1;
-	chip = irq_data_get_irq_chip(data);
-
-	if (!chip->irq_set_affinity || irq_user_affinity[irq])
-		return 1;
-
-	while (!cpu_possible(cpu) ||
-	       !cpumask_test_cpu(cpu, irq_default_affinity))
-		cpu = (cpu < (NR_CPUS-1) ? cpu + 1 : 0);
-	last_cpu = cpu;
-
-	irq_data_update_affinity(data, cpumask_of(cpu));
-	chip->irq_set_affinity(data, cpumask_of(cpu), false);
-	return 0;
-}
-#endif /* CONFIG_SMP */
-
-int arch_show_interrupts(struct seq_file *p, int prec)
-{
-	int j;
+	/*
+	 * process the entire interrupt tree in one go
+	 * Any external intc will be setup provided DT chains them
+	 * properly
+	 */
+	irqchip_init();
 
 #ifdef CONFIG_SMP
-	seq_puts(p, "IPI: ");
-	for_each_online_cpu(j)
-		seq_printf(p, "%10lu ", cpu_data[j].ipi_count);
-	seq_putc(p, '\n');
+	/* a SMP H/w block could do IPI IRQ request here */
+	if (plat_smp_ops.init_per_cpu)
+		plat_smp_ops.init_per_cpu(smp_processor_id());
 #endif
-	seq_puts(p, "PMI: ");
-	for_each_online_cpu(j)
-		seq_printf(p, "%10lu ", per_cpu(irq_pmi_count, j));
-	seq_puts(p, "          Performance Monitoring\n");
-	seq_printf(p, "ERR: %10lu\n", irq_err_count);
-	return 0;
+
+	if (machine_desc->init_per_cpu)
+		machine_desc->init_per_cpu(smp_processor_id());
 }
 
 /*
- * handle_irq handles all normal device IRQ's (the special
- * SMP cross-CPU interrupts have their own specific
- * handlers).
+ * "C" Entry point for any ARC ISR, called from low level vector handler
+ * @irq is the vector number read from ICAUSE reg of on-chip intc
  */
-
-#define MAX_ILLEGAL_IRQS 16
-
-void
-handle_irq(int irq)
-{	
-	/* 
-	 * We ack quickly, we don't want the irq controller
-	 * thinking we're snobs just because some other CPU has
-	 * disabled global interrupts (we have already done the
-	 * INT_ACK cycles, it's too late to try to pretend to the
-	 * controller that we aren't taking the interrupt).
-	 *
-	 * 0 return value means that this irq is already being
-	 * handled by some other CPU. (or is disabled)
-	 */
-	static unsigned int illegal_count=0;
-	struct irq_desc *desc = irq_to_desc(irq);
-	
-	if (!desc || ((unsigned) irq > ACTUAL_NR_IRQS &&
-	    illegal_count < MAX_ILLEGAL_IRQS)) {
-		irq_err_count++;
-		illegal_count++;
-		printk(KERN_CRIT "device_interrupt: invalid interrupt %d\n",
-		       irq);
-		return;
-	}
+void arch_do_IRQ(unsigned int hwirq, struct pt_regs *regs)
+{
+	struct pt_regs *old_regs;
 
 	irq_enter();
-	generic_handle_irq_desc(desc);
+	old_regs = set_irq_regs(regs);
+	generic_handle_domain_irq(NULL, hwirq);
+	set_irq_regs(old_regs);
 	irq_exit();
 }

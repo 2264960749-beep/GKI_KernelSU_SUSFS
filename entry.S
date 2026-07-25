@@ -1,854 +1,369 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * arch/alpha/kernel/entry.S
+ * Common Low Level Interrupts/Traps/Exceptions(non-TLB) Handling for ARC
+ * (included from entry-<isa>.S
  *
- * Kernel entry-points.
+ * Copyright (C) 2014-15 Synopsys, Inc. (www.synopsys.com)
+ * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
  */
 
-#include <asm/asm-offsets.h>
-#include <asm/thread_info.h>
-#include <asm/pal.h>
-#include <asm/errno.h>
-#include <asm/unistd.h>
-
-	.text
-	.set noat
-	.cfi_sections	.debug_frame
-
-/* Stack offsets.  */
-#define SP_OFF			184
-#define SWITCH_STACK_SIZE	320
-
-.macro	CFI_START_OSF_FRAME	func
-	.align	4
-	.globl	\func
-	.type	\func,@function
-\func:
-	.cfi_startproc simple
-	.cfi_return_column 64
-	.cfi_def_cfa	$sp, 48
-	.cfi_rel_offset	64, 8
-	.cfi_rel_offset	$gp, 16
-	.cfi_rel_offset	$16, 24
-	.cfi_rel_offset	$17, 32
-	.cfi_rel_offset	$18, 40
-.endm
-
-.macro	CFI_END_OSF_FRAME	func
-	.cfi_endproc
-	.size	\func, . - \func
-.endm
-
-/*
- * This defines the normal kernel pt-regs layout.
+/*------------------------------------------------------------------
+ *    Function                            ABI
+ *------------------------------------------------------------------
  *
- * regs 9-15 preserved by C code
- * regs 16-18 saved by PAL-code
- * regs 29-30 saved and set up by PAL-code
- * JRP - Save regs 16-18 in a special area of the stack, so that
- * the palcode-provided values are available to the signal handler.
+ *  Arguments                           r0 - r7
+ *  Caller Saved Registers              r0 - r12
+ *  Callee Saved Registers              r13- r25
+ *  Global Pointer (gp)                 r26
+ *  Frame Pointer (fp)                  r27
+ *  Stack Pointer (sp)                  r28
+ *  Branch link register (blink)        r31
+ *------------------------------------------------------------------
  */
 
-.macro	SAVE_ALL
-	subq	$sp, SP_OFF, $sp
-	.cfi_adjust_cfa_offset	SP_OFF
-	stq	$0, 0($sp)
-	stq	$1, 8($sp)
-	stq	$2, 16($sp)
-	stq	$3, 24($sp)
-	stq	$4, 32($sp)
-	stq	$28, 144($sp)
-	.cfi_rel_offset	$0, 0
-	.cfi_rel_offset $1, 8
-	.cfi_rel_offset	$2, 16
-	.cfi_rel_offset	$3, 24
-	.cfi_rel_offset	$4, 32
-	.cfi_rel_offset	$28, 144
-	lda	$2, alpha_mv
-	stq	$5, 40($sp)
-	stq	$6, 48($sp)
-	stq	$7, 56($sp)
-	stq	$8, 64($sp)
-	stq	$19, 72($sp)
-	stq	$20, 80($sp)
-	stq	$21, 88($sp)
-	ldq	$2, HAE_CACHE($2)
-	stq	$22, 96($sp)
-	stq	$23, 104($sp)
-	stq	$24, 112($sp)
-	stq	$25, 120($sp)
-	stq	$26, 128($sp)
-	stq	$27, 136($sp)
-	stq	$2, 152($sp)
-	stq	$16, 160($sp)
-	stq	$17, 168($sp)
-	stq	$18, 176($sp)
-	.cfi_rel_offset	$5, 40
-	.cfi_rel_offset	$6, 48
-	.cfi_rel_offset	$7, 56
-	.cfi_rel_offset	$8, 64
-	.cfi_rel_offset $19, 72
-	.cfi_rel_offset	$20, 80
-	.cfi_rel_offset	$21, 88
-	.cfi_rel_offset $22, 96
-	.cfi_rel_offset	$23, 104
-	.cfi_rel_offset	$24, 112
-	.cfi_rel_offset	$25, 120
-	.cfi_rel_offset	$26, 128
-	.cfi_rel_offset	$27, 136
-.endm
+;################### Special Sys Call Wrappers ##########################
 
-.macro	RESTORE_ALL
-	lda	$19, alpha_mv
-	ldq	$0, 0($sp)
-	ldq	$1, 8($sp)
-	ldq	$2, 16($sp)
-	ldq	$3, 24($sp)
-	ldq	$21, 152($sp)
-	ldq	$20, HAE_CACHE($19)
-	ldq	$4, 32($sp)
-	ldq	$5, 40($sp)
-	ldq	$6, 48($sp)
-	ldq	$7, 56($sp)
-	subq	$20, $21, $20
-	ldq	$8, 64($sp)
-	beq	$20, 99f
-	ldq	$20, HAE_REG($19)
-	stq	$21, HAE_CACHE($19)
-	stq	$21, 0($20)
-99:	ldq	$19, 72($sp)
-	ldq	$20, 80($sp)
-	ldq	$21, 88($sp)
-	ldq	$22, 96($sp)
-	ldq	$23, 104($sp)
-	ldq	$24, 112($sp)
-	ldq	$25, 120($sp)
-	ldq	$26, 128($sp)
-	ldq	$27, 136($sp)
-	ldq	$28, 144($sp)
-	addq	$sp, SP_OFF, $sp
-	.cfi_restore	$0
-	.cfi_restore	$1
-	.cfi_restore	$2
-	.cfi_restore	$3
-	.cfi_restore	$4
-	.cfi_restore	$5
-	.cfi_restore	$6
-	.cfi_restore	$7
-	.cfi_restore	$8
-	.cfi_restore	$19
-	.cfi_restore	$20
-	.cfi_restore	$21
-	.cfi_restore	$22
-	.cfi_restore	$23
-	.cfi_restore	$24
-	.cfi_restore	$25
-	.cfi_restore	$26
-	.cfi_restore	$27
-	.cfi_restore	$28
-	.cfi_adjust_cfa_offset	-SP_OFF
-.endm
+ENTRY(sys_clone_wrapper)
+	SAVE_CALLEE_SAVED_USER
+	bl  @sys_clone
+	DISCARD_CALLEE_SAVED_USER
 
-.macro	DO_SWITCH_STACK
-	bsr	$1, do_switch_stack
-	.cfi_adjust_cfa_offset	SWITCH_STACK_SIZE
-	.cfi_rel_offset	$9, 0
-	.cfi_rel_offset	$10, 8
-	.cfi_rel_offset	$11, 16
-	.cfi_rel_offset	$12, 24
-	.cfi_rel_offset	$13, 32
-	.cfi_rel_offset	$14, 40
-	.cfi_rel_offset	$15, 48
-	/* We don't really care about the FP registers for debugging.  */
-.endm
+	GET_CURR_THR_INFO_FLAGS   r10
+	and.f 0, r10, _TIF_SYSCALL_WORK
+	bnz   tracesys_exit
 
-.macro	UNDO_SWITCH_STACK
-	bsr	$1, undo_switch_stack
-	.cfi_restore	$9
-	.cfi_restore	$10
-	.cfi_restore	$11
-	.cfi_restore	$12
-	.cfi_restore	$13
-	.cfi_restore	$14
-	.cfi_restore	$15
-	.cfi_adjust_cfa_offset	-SWITCH_STACK_SIZE
-.endm
+	b .Lret_from_system_call
+END(sys_clone_wrapper)
 
-/*
- * Non-syscall kernel entry points.
- */
+ENTRY(sys_clone3_wrapper)
+	SAVE_CALLEE_SAVED_USER
+	bl  @sys_clone3
+	DISCARD_CALLEE_SAVED_USER
 
-CFI_START_OSF_FRAME entInt
-	SAVE_ALL
-	lda	$8, 0x3fff
-	lda	$26, ret_from_sys_call
-	bic	$sp, $8, $8
-	mov	$sp, $19
-	jsr	$31, do_entInt
-CFI_END_OSF_FRAME entInt
+	GET_CURR_THR_INFO_FLAGS   r10
+	and.f 0, r10, _TIF_SYSCALL_WORK
+	bnz   tracesys_exit
 
-CFI_START_OSF_FRAME entArith
-	SAVE_ALL
-	lda	$8, 0x3fff
-	lda	$26, ret_from_sys_call
-	bic	$sp, $8, $8
-	mov	$sp, $18
-	jsr	$31, do_entArith
-CFI_END_OSF_FRAME entArith
+	b .Lret_from_system_call
+END(sys_clone3_wrapper)
 
-CFI_START_OSF_FRAME entMM
-	SAVE_ALL
-/* save $9 - $15 so the inline exception code can manipulate them.  */
-	subq	$sp, 56, $sp
-	.cfi_adjust_cfa_offset	56
-	stq	$9, 0($sp)
-	stq	$10, 8($sp)
-	stq	$11, 16($sp)
-	stq	$12, 24($sp)
-	stq	$13, 32($sp)
-	stq	$14, 40($sp)
-	stq	$15, 48($sp)
-	.cfi_rel_offset	$9, 0
-	.cfi_rel_offset	$10, 8
-	.cfi_rel_offset	$11, 16
-	.cfi_rel_offset	$12, 24
-	.cfi_rel_offset	$13, 32
-	.cfi_rel_offset	$14, 40
-	.cfi_rel_offset	$15, 48
-	addq	$sp, 56, $19
-/* handle the fault */
-	lda	$8, 0x3fff
-	bic	$sp, $8, $8
-	jsr	$26, do_page_fault
-/* reload the registers after the exception code played.  */
-	ldq	$9, 0($sp)
-	ldq	$10, 8($sp)
-	ldq	$11, 16($sp)
-	ldq	$12, 24($sp)
-	ldq	$13, 32($sp)
-	ldq	$14, 40($sp)
-	ldq	$15, 48($sp)
-	addq	$sp, 56, $sp
-	.cfi_restore	$9
-	.cfi_restore	$10
-	.cfi_restore	$11
-	.cfi_restore	$12
-	.cfi_restore	$13
-	.cfi_restore	$14
-	.cfi_restore	$15
-	.cfi_adjust_cfa_offset	-56
-/* finish up the syscall as normal.  */
-	br	ret_from_sys_call
-CFI_END_OSF_FRAME entMM
+ENTRY(ret_from_fork)
+	; when the forked child comes here from the __switch_to function
+	; r0 has the last task pointer.
+	; put last task in scheduler queue
+	jl   @schedule_tail
 
-CFI_START_OSF_FRAME entIF
-	SAVE_ALL
-	lda	$8, 0x3fff
-	lda	$26, ret_from_sys_call
-	bic	$sp, $8, $8
-	mov	$sp, $17
-	jsr	$31, do_entIF
-CFI_END_OSF_FRAME entIF
+	ld   r9, [sp, PT_status32]
+	brne r9, 0, 1f
 
-CFI_START_OSF_FRAME entUna
-	lda	$sp, -256($sp)
-	.cfi_adjust_cfa_offset	256
-	stq	$0, 0($sp)
-	.cfi_rel_offset	$0, 0
-	.cfi_remember_state
-	ldq	$0, 256($sp)	/* get PS */
-	stq	$1, 8($sp)
-	stq	$2, 16($sp)
-	stq	$3, 24($sp)
-	and	$0, 8, $0		/* user mode? */
-	stq	$4, 32($sp)
-	bne	$0, entUnaUser	/* yup -> do user-level unaligned fault */
-	stq	$5, 40($sp)
-	stq	$6, 48($sp)
-	stq	$7, 56($sp)
-	stq	$8, 64($sp)
-	stq	$9, 72($sp)
-	stq	$10, 80($sp)
-	stq	$11, 88($sp)
-	stq	$12, 96($sp)
-	stq	$13, 104($sp)
-	stq	$14, 112($sp)
-	stq	$15, 120($sp)
-	/* 16-18 PAL-saved */
-	stq	$19, 152($sp)
-	stq	$20, 160($sp)
-	stq	$21, 168($sp)
-	stq	$22, 176($sp)
-	stq	$23, 184($sp)
-	stq	$24, 192($sp)
-	stq	$25, 200($sp)
-	stq	$26, 208($sp)
-	stq	$27, 216($sp)
-	stq	$28, 224($sp)
-	mov	$sp, $19
-	stq	$gp, 232($sp)
-	.cfi_rel_offset	$1, 1*8
-	.cfi_rel_offset	$2, 2*8
-	.cfi_rel_offset	$3, 3*8
-	.cfi_rel_offset	$4, 4*8
-	.cfi_rel_offset	$5, 5*8
-	.cfi_rel_offset	$6, 6*8
-	.cfi_rel_offset	$7, 7*8
-	.cfi_rel_offset	$8, 8*8
-	.cfi_rel_offset	$9, 9*8
-	.cfi_rel_offset	$10, 10*8
-	.cfi_rel_offset	$11, 11*8
-	.cfi_rel_offset	$12, 12*8
-	.cfi_rel_offset	$13, 13*8
-	.cfi_rel_offset	$14, 14*8
-	.cfi_rel_offset	$15, 15*8
-	.cfi_rel_offset	$19, 19*8
-	.cfi_rel_offset	$20, 20*8
-	.cfi_rel_offset	$21, 21*8
-	.cfi_rel_offset	$22, 22*8
-	.cfi_rel_offset	$23, 23*8
-	.cfi_rel_offset	$24, 24*8
-	.cfi_rel_offset	$25, 25*8
-	.cfi_rel_offset	$26, 26*8
-	.cfi_rel_offset	$27, 27*8
-	.cfi_rel_offset	$28, 28*8
-	.cfi_rel_offset	$29, 29*8
-	lda	$8, 0x3fff
-	stq	$31, 248($sp)
-	bic	$sp, $8, $8
-	jsr	$26, do_entUna
-	ldq	$0, 0($sp)
-	ldq	$1, 8($sp)
-	ldq	$2, 16($sp)
-	ldq	$3, 24($sp)
-	ldq	$4, 32($sp)
-	ldq	$5, 40($sp)
-	ldq	$6, 48($sp)
-	ldq	$7, 56($sp)
-	ldq	$8, 64($sp)
-	ldq	$9, 72($sp)
-	ldq	$10, 80($sp)
-	ldq	$11, 88($sp)
-	ldq	$12, 96($sp)
-	ldq	$13, 104($sp)
-	ldq	$14, 112($sp)
-	ldq	$15, 120($sp)
-	/* 16-18 PAL-saved */
-	ldq	$19, 152($sp)
-	ldq	$20, 160($sp)
-	ldq	$21, 168($sp)
-	ldq	$22, 176($sp)
-	ldq	$23, 184($sp)
-	ldq	$24, 192($sp)
-	ldq	$25, 200($sp)
-	ldq	$26, 208($sp)
-	ldq	$27, 216($sp)
-	ldq	$28, 224($sp)
-	ldq	$gp, 232($sp)
-	lda	$sp, 256($sp)
-	.cfi_restore	$1
-	.cfi_restore	$2
-	.cfi_restore	$3
-	.cfi_restore	$4
-	.cfi_restore	$5
-	.cfi_restore	$6
-	.cfi_restore	$7
-	.cfi_restore	$8
-	.cfi_restore	$9
-	.cfi_restore	$10
-	.cfi_restore	$11
-	.cfi_restore	$12
-	.cfi_restore	$13
-	.cfi_restore	$14
-	.cfi_restore	$15
-	.cfi_restore	$19
-	.cfi_restore	$20
-	.cfi_restore	$21
-	.cfi_restore	$22
-	.cfi_restore	$23
-	.cfi_restore	$24
-	.cfi_restore	$25
-	.cfi_restore	$26
-	.cfi_restore	$27
-	.cfi_restore	$28
-	.cfi_restore	$29
-	.cfi_adjust_cfa_offset	-256
-	call_pal PAL_rti
+	jl.d [r14]		; kernel thread entry point
+	mov  r0, r13		; (see PF_KTHREAD block in copy_thread)
 
-	.align	4
-entUnaUser:
-	.cfi_restore_state
-	ldq	$0, 0($sp)	/* restore original $0 */
-	lda	$sp, 256($sp)	/* pop entUna's stack frame */
-	.cfi_restore	$0
-	.cfi_adjust_cfa_offset	-256
-	SAVE_ALL		/* setup normal kernel stack */
-	lda	$sp, -56($sp)
-	.cfi_adjust_cfa_offset	56
-	stq	$9, 0($sp)
-	stq	$10, 8($sp)
-	stq	$11, 16($sp)
-	stq	$12, 24($sp)
-	stq	$13, 32($sp)
-	stq	$14, 40($sp)
-	stq	$15, 48($sp)
-	.cfi_rel_offset	$9, 0
-	.cfi_rel_offset	$10, 8
-	.cfi_rel_offset	$11, 16
-	.cfi_rel_offset	$12, 24
-	.cfi_rel_offset	$13, 32
-	.cfi_rel_offset	$14, 40
-	.cfi_rel_offset	$15, 48
-	lda	$8, 0x3fff
-	addq	$sp, 56, $19
-	bic	$sp, $8, $8
-	jsr	$26, do_entUnaUser
-	ldq	$9, 0($sp)
-	ldq	$10, 8($sp)
-	ldq	$11, 16($sp)
-	ldq	$12, 24($sp)
-	ldq	$13, 32($sp)
-	ldq	$14, 40($sp)
-	ldq	$15, 48($sp)
-	lda	$sp, 56($sp)
-	.cfi_restore	$9
-	.cfi_restore	$10
-	.cfi_restore	$11
-	.cfi_restore	$12
-	.cfi_restore	$13
-	.cfi_restore	$14
-	.cfi_restore	$15
-	.cfi_adjust_cfa_offset	-56
-	br	ret_from_sys_call
-CFI_END_OSF_FRAME entUna
+1:
+	; Return to user space
+	; 1. Any forked task (Reach here via BRne above)
+	; 2. First ever init task (Reach here via return from JL above)
+	;    This is the historic "kernel_execve" use-case, to return to init
+	;    user mode, in a round about way since that is always done from
+	;    a kernel thread which is executed via JL above but always returns
+	;    out whenever kernel_execve (now inline do_fork()) is involved
+	b    ret_from_exception
+END(ret_from_fork)
 
-CFI_START_OSF_FRAME entDbg
-	SAVE_ALL
-	lda	$8, 0x3fff
-	lda	$26, ret_from_sys_call
-	bic	$sp, $8, $8
-	mov	$sp, $16
-	jsr	$31, do_entDbg
-CFI_END_OSF_FRAME entDbg
-
-/*
- * The system call entry point is special.  Most importantly, it looks
- * like a function call to userspace as far as clobbered registers.  We
- * do preserve the argument registers (for syscall restarts) and $26
- * (for leaf syscall functions).
- *
- * So much for theory.  We don't take advantage of this yet.
- *
- * Note that a0-a2 are not saved by PALcode as with the other entry points.
- */
+;################### Non TLB Exception Handling #############################
 
-	.align	4
-	.globl	entSys
-	.type	entSys, @function
-	.cfi_startproc simple
-	.cfi_return_column 64
-	.cfi_def_cfa	$sp, 48
-	.cfi_rel_offset	64, 8
-	.cfi_rel_offset	$gp, 16
-entSys:
-	SAVE_ALL
-	lda	$8, 0x3fff
-	bic	$sp, $8, $8
-	lda	$4, NR_SYSCALLS($31)
-	stq	$16, SP_OFF+24($sp)
-	lda	$5, sys_call_table
-	lda	$27, sys_ni_syscall
-	cmpult	$0, $4, $4
-	ldl	$3, TI_FLAGS($8)
-	stq	$17, SP_OFF+32($sp)
-	s8addq	$0, $5, $5
-	stq	$18, SP_OFF+40($sp)
-	.cfi_rel_offset	$16, SP_OFF+24
-	.cfi_rel_offset	$17, SP_OFF+32
-	.cfi_rel_offset	$18, SP_OFF+40
-#ifdef CONFIG_AUDITSYSCALL
-	lda     $6, _TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT
-	and     $3, $6, $3
-	bne     $3, strace
-#else
-	blbs    $3, strace		/* check for SYSCALL_TRACE in disguise */
+; ---------------------------------------------
+; Instruction Error Exception Handler
+; ---------------------------------------------
+
+ENTRY(instr_service)
+
+	EXCEPTION_PROLOGUE
+
+	lr  r0, [efa]
+	mov r1, sp
+
+	FAKE_RET_FROM_EXCPN
+
+	bl  do_insterror_or_kprobe
+	b   ret_from_exception
+END(instr_service)
+
+; ---------------------------------------------
+; Machine Check Exception Handler
+; ---------------------------------------------
+
+ENTRY(EV_MachineCheck)
+
+	EXCEPTION_PROLOGUE
+
+	lr  r2, [ecr]
+	lr  r0, [efa]
+	mov r1, sp
+
+	; MC excpetions disable MMU
+	ARC_MMU_REENABLE r3
+
+	lsr  	r3, r2, 8
+	bmsk 	r3, r3, 7
+	brne    r3, ECR_C_MCHK_DUP_TLB, 1f
+
+	bl      do_tlb_overlap_fault
+	b       ret_from_exception
+
+1:
+	; DEAD END: can't do much, display Regs and HALT
+	SAVE_CALLEE_SAVED_USER
+
+	GET_CURR_TASK_FIELD_PTR   TASK_THREAD, r10
+	st  sp, [r10, THREAD_CALLEE_REG]
+
+	j  do_machine_check_fault
+
+END(EV_MachineCheck)
+
+; ---------------------------------------------
+; Privilege Violation Exception Handler
+; ---------------------------------------------
+ENTRY(EV_PrivilegeV)
+
+	EXCEPTION_PROLOGUE
+
+	lr  r0, [efa]
+	mov r1, sp
+
+	FAKE_RET_FROM_EXCPN
+
+	bl  do_privilege_fault
+	b   ret_from_exception
+END(EV_PrivilegeV)
+
+; ---------------------------------------------
+; Extension Instruction Exception Handler
+; ---------------------------------------------
+ENTRY(EV_Extension)
+
+	EXCEPTION_PROLOGUE
+
+	lr  r0, [efa]
+	mov r1, sp
+
+	FAKE_RET_FROM_EXCPN
+
+	bl  do_extension_fault
+	b   ret_from_exception
+END(EV_Extension)
+
+;################ Trap Handling (Syscall, Breakpoint) ##################
+
+; ---------------------------------------------
+; syscall Tracing
+; ---------------------------------------------
+tracesys:
+	; save EFA in case tracer wants the PC of traced task
+	; using ERET won't work since next-PC has already committed
+	GET_CURR_TASK_FIELD_PTR   TASK_THREAD, r11
+	st  r12, [r11, THREAD_FAULT_ADDR]	; thread.fault_address
+
+	; PRE Sys Call Ptrace hook
+	mov r0, sp			; pt_regs needed
+	bl  @syscall_trace_entry
+
+	; Tracing code now returns the syscall num (orig or modif)
+	mov r8, r0
+
+	; Do the Sys Call as we normally would.
+	; Validate the Sys Call number
+	cmp     r8,  NR_syscalls - 1
+	mov.hi  r0, -ENOSYS
+	bhi     tracesys_exit
+
+	; Restore the sys-call args. Mere invocation of the hook abv could have
+	; clobbered them (since they are in scratch regs). The tracer could also
+	; have deliberately changed the syscall args: r0-r7
+	ld  r0, [sp, PT_r0]
+	ld  r1, [sp, PT_r1]
+	ld  r2, [sp, PT_r2]
+	ld  r3, [sp, PT_r3]
+	ld  r4, [sp, PT_r4]
+	ld  r5, [sp, PT_r5]
+	ld  r6, [sp, PT_r6]
+	ld  r7, [sp, PT_r7]
+	ld.as   r9, [sys_call_table, r8]
+	jl      [r9]        ; Entry into Sys Call Handler
+
+tracesys_exit:
+	st  r0, [sp, PT_r0]     ; sys call return value in pt_regs
+
+	;POST Sys Call Ptrace Hook
+	mov r0, sp		; pt_regs needed
+	bl  @syscall_trace_exit
+	b   ret_from_exception ; NOT ret_from_system_call at is saves r0 which
+	; we'd done before calling post hook above
+
+; ---------------------------------------------
+; Breakpoint TRAP
+; ---------------------------------------------
+trap_with_param:
+	mov r0, r12	; EFA in case ptracer/gdb wants stop_pc
+	mov r1, sp
+
+	; Save callee regs in case gdb wants to have a look
+	; SP will grow up by size of CALLEE Reg-File
+	; NOTE: clobbers r12
+	SAVE_CALLEE_SAVED_USER
+
+	; save location of saved Callee Regs @ thread_struct->pc
+	GET_CURR_TASK_FIELD_PTR   TASK_THREAD, r10
+	st  sp, [r10, THREAD_CALLEE_REG]
+
+	; Call the trap handler
+	bl  do_non_swi_trap
+
+	; unwind stack to discard Callee saved Regs
+	DISCARD_CALLEE_SAVED_USER
+
+	b   ret_from_exception
+
+; ---------------------------------------------
+; syscall TRAP
+; ABI: (r0-r7) upto 8 args, (r8) syscall number
+; ---------------------------------------------
+
+ENTRY(EV_Trap)
+
+	EXCEPTION_PROLOGUE
+
+	lr  r12, [efa]
+
+	FAKE_RET_FROM_EXCPN
+
+	;============ TRAP 1   :breakpoints
+	; Check ECR for trap with arg (PROLOGUE ensures r10 has ECR)
+	bmsk.f 0, r10, 7
+	bnz    trap_with_param
+
+	;============ TRAP  (no param): syscall top level
+
+	; If syscall tracing ongoing, invoke pre-post-hooks
+	GET_CURR_THR_INFO_FLAGS   r10
+	and.f 0, r10, _TIF_SYSCALL_WORK
+	bnz   tracesys  ; this never comes back
+
+	;============ Normal syscall case
+
+	; syscall num shd not exceed the total system calls avail
+	cmp     r8,  NR_syscalls - 1
+	mov.hi  r0, -ENOSYS
+	bhi     .Lret_from_system_call
+
+	; Offset into the syscall_table and call handler
+	ld.as   r9,[sys_call_table, r8]
+	jl      [r9]        ; Entry into Sys Call Handler
+
+.Lret_from_system_call:
+
+	st  r0, [sp, PT_r0]     ; sys call return value in pt_regs
+
+	; fall through to ret_from_exception
+END(EV_Trap)
+
+;############# Return from Intr/Excp/Trap (Linux Specifics) ##############
+;
+; If ret to user mode do we need to handle signals, schedule() et al.
+
+ENTRY(ret_from_exception)
+
+	; Pre-{IRQ,Trap,Exception} K/U mode from pt_regs->status32
+	ld  r8, [sp, PT_status32]   ; returning to User/Kernel Mode
+
+	bbit0  r8, STATUS_U_BIT, resume_kernel_mode
+
+	; Before returning to User mode check-for-and-complete any pending work
+	; such as rescheduling/signal-delivery etc.
+resume_user_mode_begin:
+
+	; Disable IRQs to ensures that chk for pending work itself is atomic
+	; (and we don't end up missing a NEED_RESCHED/SIGPENDING due to an
+	; interim IRQ).
+	IRQ_DISABLE	r10
+
+	; Fast Path return to user mode if no pending work
+	GET_CURR_THR_INFO_FLAGS   r9
+	and.f  0,  r9, _TIF_WORK_MASK
+	bz     .Lrestore_regs
+
+	; --- (Slow Path #1) task preemption ---
+	bbit0  r9, TIF_NEED_RESCHED, .Lchk_pend_signals
+	mov    blink, resume_user_mode_begin  ; tail-call to U mode ret chks
+	j      @schedule 	; BTST+Bnz causes relo error in link
+
+.Lchk_pend_signals:
+	IRQ_ENABLE	r10
+
+	; --- (Slow Path #2) pending signal  ---
+	mov r0, sp	; pt_regs for arg to do_signal()/do_notify_resume()
+
+	GET_CURR_THR_INFO_FLAGS   r9
+	and.f  0,  r9, _TIF_SIGPENDING|_TIF_NOTIFY_SIGNAL
+	bz .Lchk_notify_resume
+
+	; Normal Trap/IRQ entry only saves Scratch (caller-saved) regs
+	; in pt_reg since the "C" ABI (kernel code) will automatically
+	; save/restore callee-saved regs.
+	;
+	; However, here we need to explicitly save callee regs because
+	; (i)  If this signal causes coredump - full regfile needed
+	; (ii) If signal is SIGTRAP/SIGSTOP, task is being traced thus
+	;      tracer might call PEEKUSR(CALLEE reg)
+	;
+	; NOTE: SP will grow up by size of CALLEE Reg-File
+	SAVE_CALLEE_SAVED_USER		; clobbers r12
+
+	; save location of saved Callee Regs @ thread_struct->callee
+	GET_CURR_TASK_FIELD_PTR   TASK_THREAD, r10
+	st  sp, [r10, THREAD_CALLEE_REG]
+
+	bl  @do_signal
+
+	; Ideally we want to discard the Callee reg above, however if this was
+	; a tracing signal, tracer could have done a POKEUSR(CALLEE reg)
+	RESTORE_CALLEE_SAVED_USER
+
+	b      resume_user_mode_begin	; loop back to start of U mode ret
+
+	; --- (Slow Path #3) notify_resume ---
+.Lchk_notify_resume:
+	btst   r9, TIF_NOTIFY_RESUME
+	blnz   @do_notify_resume
+	b      resume_user_mode_begin	; unconditionally back to U mode ret chks
+					; for single exit point from this block
+
+resume_kernel_mode:
+
+	; Disable Interrupts from this point on
+	; CONFIG_PREEMPTION: This is a must for preempt_schedule_irq()
+	; !CONFIG_PREEMPTION: To ensure restore_regs is intr safe
+	IRQ_DISABLE	r9
+
+#ifdef CONFIG_PREEMPTION
+
+	; Can't preempt if preemption disabled
+	GET_CURR_THR_INFO_FROM_SP   r10
+	ld  r8, [r10, THREAD_INFO_PREEMPT_COUNT]
+	brne  r8, 0, .Lrestore_regs
+
+	; check if this task's NEED_RESCHED flag set
+	ld  r9, [r10, THREAD_INFO_FLAGS]
+	bbit0  r9, TIF_NEED_RESCHED, .Lrestore_regs
+
+	; Invoke PREEMPTION
+	jl      preempt_schedule_irq
+
+	; preempt_schedule_irq() always returns with IRQ disabled
 #endif
-	beq	$4, 1f
-	ldq	$27, 0($5)
-1:	jsr	$26, ($27), sys_ni_syscall
-	ldgp	$gp, 0($26)
-	blt	$0, $syscall_error	/* the call failed */
-	stq	$0, 0($sp)
-	stq	$31, 72($sp)		/* a3=0 => no error */
 
-	.align	4
-	.globl	ret_from_sys_call
-ret_from_sys_call:
-	cmovne	$26, 0, $18		/* $18 = 0 => non-restartable */
-	ldq	$0, SP_OFF($sp)
-	and	$0, 8, $0
-	beq	$0, ret_to_kernel
-ret_to_user:
-	/* Make sure need_resched and sigpending don't change between
-		sampling and the rti.  */
-	lda	$16, 7
-	call_pal PAL_swpipl
-	ldl	$17, TI_FLAGS($8)
-	and	$17, _TIF_WORK_MASK, $2
-	bne	$2, work_pending
-restore_all:
-	.cfi_remember_state
-	RESTORE_ALL
-	call_pal PAL_rti
+	b	.Lrestore_regs
 
-ret_to_kernel:
-	.cfi_restore_state
-	lda	$16, 7
-	call_pal PAL_swpipl
-	br restore_all
+##### DONT ADD CODE HERE - .Lrestore_regs actually follows in entry-<isa>.S
 
-	.align 3
-$syscall_error:
-	/*
-	 * Some system calls (e.g., ptrace) can return arbitrary
-	 * values which might normally be mistaken as error numbers.
-	 * Those functions must zero $0 (v0) directly in the stack
-	 * frame to indicate that a negative return value wasn't an
-	 * error number..
-	 */
-	ldq	$18, 0($sp)	/* old syscall nr (zero if success) */
-	beq	$18, $ret_success
-
-	ldq	$19, 72($sp)	/* .. and this a3 */
-	subq	$31, $0, $0	/* with error in v0 */
-	addq	$31, 1, $1	/* set a3 for errno return */
-	stq	$0, 0($sp)
-	mov	$31, $26	/* tell "ret_from_sys_call" we can restart */
-	stq	$1, 72($sp)	/* a3 for return */
-	br	ret_from_sys_call
-
-$ret_success:
-	stq	$0, 0($sp)
-	stq	$31, 72($sp)	/* a3=0 => no error */
-	br	ret_from_sys_call
-
-/*
- * Do all cleanup when returning from all interrupts and system calls.
- *
- * Arguments:
- *       $8: current.
- *      $17: TI_FLAGS.
- *      $18: The old syscall number, or zero if this is not a return
- *           from a syscall that errored and is possibly restartable.
- *      $19: The old a3 value
- */
-
-	.align	4
-	.type	work_pending, @function
-work_pending:
-	and	$17, _TIF_NOTIFY_RESUME | _TIF_SIGPENDING | _TIF_NOTIFY_SIGNAL, $2
-	bne	$2, $work_notifysig
-
-$work_resched:
-	/*
-	 * We can get here only if we returned from syscall without SIGPENDING
-	 * or got through work_notifysig already.  Either case means no syscall
-	 * restarts for us, so let $18 and $19 burn.
-	 */
-	jsr	$26, schedule
-	mov	0, $18
-	br	ret_to_user
-
-$work_notifysig:
-	mov	$sp, $16
-	DO_SWITCH_STACK
-	jsr	$26, do_work_pending
-	UNDO_SWITCH_STACK
-	br	restore_all
-
-/*
- * PTRACE syscall handler
- */
-
-	.align	4
-	.type	strace, @function
-strace:
-	/* set up signal stack, call syscall_trace */
-	DO_SWITCH_STACK
-	jsr	$26, syscall_trace_enter /* returns the syscall number */
-	UNDO_SWITCH_STACK
-
-	/* get the arguments back.. */
-	ldq	$16, SP_OFF+24($sp)
-	ldq	$17, SP_OFF+32($sp)
-	ldq	$18, SP_OFF+40($sp)
-	ldq	$19, 72($sp)
-	ldq	$20, 80($sp)
-	ldq	$21, 88($sp)
-
-	/* get the system call pointer.. */
-	lda	$1, NR_SYSCALLS($31)
-	lda	$2, sys_call_table
-	lda	$27, sys_ni_syscall
-	cmpult	$0, $1, $1
-	s8addq	$0, $2, $2
-	beq	$1, 1f
-	ldq	$27, 0($2)
-1:	jsr	$26, ($27), sys_gettimeofday
-ret_from_straced:
-	ldgp	$gp, 0($26)
-
-	/* check return.. */
-	blt	$0, $strace_error	/* the call failed */
-	stq	$31, 72($sp)		/* a3=0 => no error */
-$strace_success:
-	stq	$0, 0($sp)		/* save return value */
-
-	DO_SWITCH_STACK
-	jsr	$26, syscall_trace_leave
-	UNDO_SWITCH_STACK
-	br	$31, ret_from_sys_call
-
-	.align	3
-$strace_error:
-	ldq	$18, 0($sp)	/* old syscall nr (zero if success) */
-	beq	$18, $strace_success
-	ldq	$19, 72($sp)	/* .. and this a3 */
-
-	subq	$31, $0, $0	/* with error in v0 */
-	addq	$31, 1, $1	/* set a3 for errno return */
-	stq	$0, 0($sp)
-	stq	$1, 72($sp)	/* a3 for return */
-
-	DO_SWITCH_STACK
-	mov	$18, $9		/* save old syscall number */
-	mov	$19, $10	/* save old a3 */
-	jsr	$26, syscall_trace_leave
-	mov	$9, $18
-	mov	$10, $19
-	UNDO_SWITCH_STACK
-
-	mov	$31, $26	/* tell "ret_from_sys_call" we can restart */
-	br	ret_from_sys_call
-CFI_END_OSF_FRAME entSys
-
-/*
- * Save and restore the switch stack -- aka the balance of the user context.
- */
-
-	.align	4
-	.type	do_switch_stack, @function
-	.cfi_startproc simple
-	.cfi_return_column 64
-	.cfi_def_cfa $sp, 0
-	.cfi_register 64, $1
-do_switch_stack:
-	lda	$sp, -SWITCH_STACK_SIZE($sp)
-	.cfi_adjust_cfa_offset	SWITCH_STACK_SIZE
-	stq	$9, 0($sp)
-	stq	$10, 8($sp)
-	stq	$11, 16($sp)
-	stq	$12, 24($sp)
-	stq	$13, 32($sp)
-	stq	$14, 40($sp)
-	stq	$15, 48($sp)
-	stq	$26, 56($sp)
-	stt	$f0, 64($sp)
-	stt	$f1, 72($sp)
-	stt	$f2, 80($sp)
-	stt	$f3, 88($sp)
-	stt	$f4, 96($sp)
-	stt	$f5, 104($sp)
-	stt	$f6, 112($sp)
-	stt	$f7, 120($sp)
-	stt	$f8, 128($sp)
-	stt	$f9, 136($sp)
-	stt	$f10, 144($sp)
-	stt	$f11, 152($sp)
-	stt	$f12, 160($sp)
-	stt	$f13, 168($sp)
-	stt	$f14, 176($sp)
-	stt	$f15, 184($sp)
-	stt	$f16, 192($sp)
-	stt	$f17, 200($sp)
-	stt	$f18, 208($sp)
-	stt	$f19, 216($sp)
-	stt	$f20, 224($sp)
-	stt	$f21, 232($sp)
-	stt	$f22, 240($sp)
-	stt	$f23, 248($sp)
-	stt	$f24, 256($sp)
-	stt	$f25, 264($sp)
-	stt	$f26, 272($sp)
-	stt	$f27, 280($sp)
-	mf_fpcr	$f0		# get fpcr
-	stt	$f28, 288($sp)
-	stt	$f29, 296($sp)
-	stt	$f30, 304($sp)
-	stt	$f0, 312($sp)	# save fpcr in slot of $f31
-	ldt	$f0, 64($sp)	# dont let "do_switch_stack" change fp state.
-	ret	$31, ($1), 1
-	.cfi_endproc
-	.size	do_switch_stack, .-do_switch_stack
-
-	.align	4
-	.type	undo_switch_stack, @function
-	.cfi_startproc simple
-	.cfi_def_cfa $sp, 0
-	.cfi_register 64, $1
-undo_switch_stack:
-	ldq	$9, 0($sp)
-	ldq	$10, 8($sp)
-	ldq	$11, 16($sp)
-	ldq	$12, 24($sp)
-	ldq	$13, 32($sp)
-	ldq	$14, 40($sp)
-	ldq	$15, 48($sp)
-	ldq	$26, 56($sp)
-	ldt	$f30, 312($sp)	# get saved fpcr
-	ldt	$f0, 64($sp)
-	ldt	$f1, 72($sp)
-	ldt	$f2, 80($sp)
-	ldt	$f3, 88($sp)
-	mt_fpcr	$f30		# install saved fpcr
-	ldt	$f4, 96($sp)
-	ldt	$f5, 104($sp)
-	ldt	$f6, 112($sp)
-	ldt	$f7, 120($sp)
-	ldt	$f8, 128($sp)
-	ldt	$f9, 136($sp)
-	ldt	$f10, 144($sp)
-	ldt	$f11, 152($sp)
-	ldt	$f12, 160($sp)
-	ldt	$f13, 168($sp)
-	ldt	$f14, 176($sp)
-	ldt	$f15, 184($sp)
-	ldt	$f16, 192($sp)
-	ldt	$f17, 200($sp)
-	ldt	$f18, 208($sp)
-	ldt	$f19, 216($sp)
-	ldt	$f20, 224($sp)
-	ldt	$f21, 232($sp)
-	ldt	$f22, 240($sp)
-	ldt	$f23, 248($sp)
-	ldt	$f24, 256($sp)
-	ldt	$f25, 264($sp)
-	ldt	$f26, 272($sp)
-	ldt	$f27, 280($sp)
-	ldt	$f28, 288($sp)
-	ldt	$f29, 296($sp)
-	ldt	$f30, 304($sp)
-	lda	$sp, SWITCH_STACK_SIZE($sp)
-	ret	$31, ($1), 1
-	.cfi_endproc
-	.size	undo_switch_stack, .-undo_switch_stack
-
-/*
- * The meat of the context switch code.
- */
-
-	.align	4
-	.globl	alpha_switch_to
-	.type	alpha_switch_to, @function
-	.cfi_startproc
-alpha_switch_to:
-	DO_SWITCH_STACK
-	call_pal PAL_swpctx
-	lda	$8, 0x3fff
-	UNDO_SWITCH_STACK
-	bic	$sp, $8, $8
-	mov	$17, $0
-	ret
-	.cfi_endproc
-	.size	alpha_switch_to, .-alpha_switch_to
-
-/*
- * New processes begin life here.
- */
-
-	.globl	ret_from_fork
-	.align	4
-	.ent	ret_from_fork
-ret_from_fork:
-	lda	$26, ret_from_sys_call
-	mov	$17, $16
-	jmp	$31, schedule_tail
-.end ret_from_fork
-
-/*
- * ... and new kernel threads - here
- */
-	.align 4
-	.globl	ret_from_kernel_thread
-	.ent	ret_from_kernel_thread
-ret_from_kernel_thread:
-	mov	$17, $16
-	jsr	$26, schedule_tail
-	mov	$9, $27
-	mov	$10, $16
-	jsr	$26, ($9)
-	br	$31, ret_to_user
-.end ret_from_kernel_thread
-
-
-/*
- * Special system calls.  Most of these are special in that they either
- * have to play switch_stack games.
- */
-
-.macro	fork_like name
-	.align	4
-	.globl	alpha_\name
-	.ent	alpha_\name
-alpha_\name:
-	.prologue 0
-	bsr	$1, do_switch_stack
-	jsr	$26, sys_\name
-	ldq	$26, 56($sp)
-	lda	$sp, SWITCH_STACK_SIZE($sp)
-	ret
-.end	alpha_\name
-.endm
-
-fork_like fork
-fork_like vfork
-fork_like clone
-
-.macro	sigreturn_like name
-	.align	4
-	.globl	sys_\name
-	.ent	sys_\name
-sys_\name:
-	.prologue 0
-	lda	$9, ret_from_straced
-	cmpult	$26, $9, $9
-	lda	$sp, -SWITCH_STACK_SIZE($sp)
-	jsr	$26, do_\name
-	bne	$9, 1f
-	jsr	$26, syscall_trace_leave
-1:	br	$1, undo_switch_stack
-	br	ret_from_sys_call
-.end sys_\name
-.endm
-
-sigreturn_like sigreturn
-sigreturn_like rt_sigreturn
-
-	.align	4
-	.globl	alpha_syscall_zero
-	.ent	alpha_syscall_zero
-alpha_syscall_zero:
-	.prologue 0
-	/* Special because it needs to do something opposite to
-	   force_successful_syscall_return().  We use the saved
-	   syscall number for that, zero meaning "not an error".
-	   That works nicely, but for real syscall 0 we need to
-	   make sure that this logics doesn't get confused.
-	   Store a non-zero there - -ENOSYS we need in register
-	   for our return value will do just fine.
-	  */
-	lda	$0, -ENOSYS
-	unop
-	stq	$0, 0($sp)
-	ret
-.end alpha_syscall_zero
