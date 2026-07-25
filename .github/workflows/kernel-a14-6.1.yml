@@ -36,12 +36,12 @@ jobs:
   build-kernel:
     runs-on: ubuntu-latest
     steps:
-      - name: 拉取当前仓库（仅包含workflow与vendor_boot.img）
+      - name: 拉取当前仓库（仅包含workflow）
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: 拉取一加Ace5竞速 PLF110 官方内核源码（云端自动下载，不用手机上传大文件）
+      - name: 云端自动拉取一加Ace5竞速 PLF110 官方内核源码
         run: |
           git clone -b oneplus/mt6989_v_15.0.2_ace5_race https://github.com/OnePlusOSS/android_kernel_oneplus_mt6989.git tmp_kernel
           mv tmp_kernel/* ./
@@ -52,7 +52,7 @@ jobs:
           sudo apt update -y
           sudo apt install -y build-essential libssl-dev libelf-dev bison flex zip unzip lld llvm python3
 
-      - name: 下载MT6989天玑9400e专用Clang工具链
+      - name: 下载MT6989天玑专用Clang工具链
         run: |
           git clone https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r498229b clang
           echo "CLANG_BIN=$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_ENV
@@ -71,27 +71,20 @@ jobs:
           bash scripts/patch_sukisu/apply_gki.sh $GITHUB_WORKSPACE
           cd susfs && bash apply_patches.sh $GITHUB_WORKSPACE
 
-      - name: 加载PLF110设备配置并开启功能开关
+      - name: 加载PLF110机型配置并开启功能开关
         run: |
           export ARCH=arm64
           make oplus_plf110_defconfig
-          # 完整GKI镜像编译
           scripts/config --enable BUILD_GKI_BOOTIMG
-          # AK3调度
           scripts/config --enable CONFIG_AK3_SCHEDULER
-          # Sukisu基础
           scripts/config --enable CONFIG_SUKISU
           scripts/config --enable CONFIG_MODULES
-          # SUSFS全套隐藏功能
           scripts/config --enable CONFIG_KSU_SUSFS
           scripts/config --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
           scripts/config --enable CONFIG_KSU_SUSFS_SUS_PATH
           scripts/config --enable CONFIG_KSU_SUSFS_SUS_MOUNT
-          # 导出Oplus游戏驱动符号，兼容风驰内核模块
-          scripts/config --enable CONFIG_OPLUS_GAME_MODULE_EXPORT
-          # 禁用小米平板专属配置
+          scripts/config --enable CONFIG_OPLUS_GAME_DRIVER_EXPORT
           scripts/config --disable CONFIG_HMBIRD
-          # ZRAM、KPM开关
           if [[ "${{ inputs.use_zram }}" == "false" ]]; then
             scripts/config --disable CONFIG_ZRAM
           fi
@@ -105,11 +98,11 @@ jobs:
           export CROSS_COMPILE=aarch64-linux-gnu-
           make -j$(nproc)
 
-      - name: 打包AnyKernel3刷机包（嵌入你上传的vendor_boot.img）
+      - name: 打包AnyKernel3刷机包（注释vendor_boot，无需上传镜像）
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 anykernel
           cp arch/arm64/boot/Image anykernel/Image
-          cp ./vendor_boot.img anykernel/vendor_boot.img
+          # cp ./vendor_boot.img anykernel/vendor_boot.img
           cd anykernel
           zip -r ../GKI-AK3-SUKISU-PLF110.zip *
           cd ..
