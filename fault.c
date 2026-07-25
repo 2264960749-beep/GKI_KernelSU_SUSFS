@@ -1,245 +1,192 @@
-// SPDX-License-Identifier: GPL-2.0
-/*
- *  linux/arch/alpha/mm/fault.c
+// SPDX-License-Identifier: GPL-2.0-only
+/* Page Fault Handling for ARC (TLB Miss / ProtV)
  *
- *  Copyright (C) 1995  Linus Torvalds
+ * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
  */
-
-#include <linux/sched/signal.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
-#include <asm/io.h>
-
-#define __EXTERN_INLINE inline
-#include <asm/mmu_context.h>
-#include <asm/tlbflush.h>
-#undef  __EXTERN_INLINE
 
 #include <linux/signal.h>
-#include <linux/errno.h>
-#include <linux/string.h>
-#include <linux/types.h>
-#include <linux/ptrace.h>
-#include <linux/mman.h>
-#include <linux/smp.h>
 #include <linux/interrupt.h>
-#include <linux/extable.h>
+#include <linux/sched/signal.h>
+#include <linux/errno.h>
+#include <linux/ptrace.h>
 #include <linux/uaccess.h>
+#include <linux/kdebug.h>
 #include <linux/perf_event.h>
-
-extern void die_if_kernel(char *,struct pt_regs *,long, unsigned long *);
-
+#include <linux/mm_types.h>
+#include <asm/mmu.h>
 
 /*
- * Force a new ASN for a task.
+ * kernel virtual address is required to implement vmalloc/pkmap/fixmap
+ * Refer to asm/processor.h for System Memory Map
+ *
+ * It simply copies the PMD entry (pointer to 2nd level page table or hugepage)
+ * from swapper pgdir to task pgdir. The 2nd level table/page is thus shared
  */
-
-#ifndef CONFIG_SMP
-unsigned long last_asn = ASN_FIRST_VERSION;
-#endif
-
-void
-__load_new_mm_context(struct mm_struct *next_mm)
+noinline static int handle_kernel_vaddr_fault(unsigned long address)
 {
-	unsigned long mmc;
-	struct pcb_struct *pcb;
+	/*
+	 * Synchronize this task's top level page-table
+	 * with the 'reference' page table.
+	 */
+	pgd_t *pgd, *pgd_k;
+	p4d_t *p4d, *p4d_k;
+	pud_t *pud, *pud_k;
+	pmd_t *pmd, *pmd_k;
 
-	mmc = __get_new_mm_context(next_mm, smp_processor_id());
-	next_mm->context[smp_processor_id()] = mmc;
+	pgd = pgd_offset(current->active_mm, address);
+	pgd_k = pgd_offset_k(address);
 
-	pcb = &current_thread_info()->pcb;
-	pcb->asn = mmc & HARDWARE_ASN_MASK;
-	pcb->ptbr = ((unsigned long) next_mm->pgd - IDENT_ADDR) >> PAGE_SHIFT;
+	if (pgd_none (*pgd_k))
+		goto bad_area;
+	if (!pgd_present(*pgd))
+		set_pgd(pgd, *pgd_k);
 
-	__reload_thread(pcb);
+	p4d = p4d_offset(pgd, address);
+	p4d_k = p4d_offset(pgd_k, address);
+	if (p4d_none(*p4d_k))
+		goto bad_area;
+	if (!p4d_present(*p4d))
+		set_p4d(p4d, *p4d_k);
+
+	pud = pud_offset(p4d, address);
+	pud_k = pud_offset(p4d_k, address);
+	if (pud_none(*pud_k))
+		goto bad_area;
+	if (!pud_present(*pud))
+		set_pud(pud, *pud_k);
+
+	pmd = pmd_offset(pud, address);
+	pmd_k = pmd_offset(pud_k, address);
+	if (pmd_none(*pmd_k))
+		goto bad_area;
+	if (!pmd_present(*pmd))
+		set_pmd(pmd, *pmd_k);
+
+	/* XXX: create the TLB entry here */
+	return 0;
+
+bad_area:
+	return 1;
 }
 
-
-/*
- * This routine handles page faults.  It determines the address,
- * and the problem, and then passes it off to handle_mm_fault().
- *
- * mmcsr:
- *	0 = translation not valid
- *	1 = access violation
- *	2 = fault-on-read
- *	3 = fault-on-execute
- *	4 = fault-on-write
- *
- * cause:
- *	-1 = instruction fetch
- *	0 = load
- *	1 = store
- *
- * Registers $9 through $15 are saved in a block just prior to `regs' and
- * are saved and restored around the call to allow exception code to
- * modify them.
- */
-
-/* Macro for exception fixup code to access integer registers.  */
-#define dpf_reg(r)							\
-	(((unsigned long *)regs)[(r) <= 8 ? (r) : (r) <= 15 ? (r)-16 :	\
-				 (r) <= 18 ? (r)+10 : (r)-10])
-
-asmlinkage void
-do_page_fault(unsigned long address, unsigned long mmcsr,
-	      long cause, struct pt_regs *regs)
+void do_page_fault(unsigned long address, struct pt_regs *regs)
 {
-	struct vm_area_struct * vma;
-	struct mm_struct *mm = current->mm;
-	const struct exception_table_entry *fixup;
-	int si_code = SEGV_MAPERR;
-	vm_fault_t fault;
-	unsigned int flags = FAULT_FLAG_DEFAULT;
+	struct vm_area_struct *vma = NULL;
+	struct task_struct *tsk = current;
+	struct mm_struct *mm = tsk->mm;
+	int sig, si_code = SEGV_MAPERR;
+	unsigned int write = 0, exec = 0, mask;
+	vm_fault_t fault = VM_FAULT_SIGSEGV;	/* handle_mm_fault() output */
+	unsigned int flags;			/* handle_mm_fault() input */
 
-	/* As of EV6, a load into $31/$f31 is a prefetch, and never faults
-	   (or is suppressed by the PALcode).  Support that for older CPUs
-	   by ignoring such an instruction.  */
-	if (cause == 0) {
-		unsigned int insn;
-		__get_user(insn, (unsigned int __user *)regs->pc);
-		if ((insn >> 21 & 0x1f) == 0x1f &&
-		    /* ldq ldl ldt lds ldg ldf ldwu ldbu */
-		    (1ul << (insn >> 26) & 0x30f00001400ul)) {
-			regs->pc += 4;
+	/*
+	 * NOTE! We MUST NOT take any locks for this case. We may
+	 * be in an interrupt or a critical region, and should
+	 * only copy the information from the master page table,
+	 * nothing more.
+	 */
+	if (address >= VMALLOC_START && !user_mode(regs)) {
+		if (unlikely(handle_kernel_vaddr_fault(address)))
+			goto no_context;
+		else
 			return;
-		}
 	}
 
-	/* If we're in an interrupt context, or have no user context,
-	   we must not take the fault.  */
-	if (!mm || faulthandler_disabled())
+	/*
+	 * If we're in an interrupt or have no user
+	 * context, we must not take the fault..
+	 */
+	if (faulthandler_disabled() || !mm)
 		goto no_context;
 
-#ifdef CONFIG_ALPHA_LARGE_VMALLOC
-	if (address >= TASK_SIZE)
-		goto vmalloc_fault;
-#endif
+	if (regs->ecr_cause & ECR_C_PROTV_STORE)	/* ST/EX */
+		write = 1;
+	else if ((regs->ecr_vec == ECR_V_PROTV) &&
+	         (regs->ecr_cause == ECR_C_PROTV_INST_FETCH))
+		exec = 1;
+
+	flags = FAULT_FLAG_DEFAULT;
 	if (user_mode(regs))
 		flags |= FAULT_FLAG_USER;
+	if (write)
+		flags |= FAULT_FLAG_WRITE;
+
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, address);
 retry:
 	vma = lock_mm_and_find_vma(mm, address, regs);
 	if (!vma)
 		goto bad_area_nosemaphore;
 
-	/* Ok, we have a good vm_area for this memory access, so
-	   we can handle it.  */
-	si_code = SEGV_ACCERR;
-	if (cause < 0) {
-		if (!(vma->vm_flags & VM_EXEC))
-			goto bad_area;
-	} else if (!cause) {
-		/* Allow reads even for write-only mappings */
-		if (!(vma->vm_flags & (VM_READ | VM_WRITE)))
-			goto bad_area;
-	} else {
-		if (!(vma->vm_flags & VM_WRITE))
-			goto bad_area;
-		flags |= FAULT_FLAG_WRITE;
+	/*
+	 * vm_area is good, now check permissions for this memory access
+	 */
+	mask = VM_READ;
+	if (write)
+		mask = VM_WRITE;
+	if (exec)
+		mask = VM_EXEC;
+
+	if (!(vma->vm_flags & mask)) {
+		si_code = SEGV_ACCERR;
+		goto bad_area;
 	}
 
-	/* If for any reason at all we couldn't handle the fault,
-	   make sure we exit gracefully rather than endlessly redo
-	   the fault.  */
 	fault = handle_mm_fault(vma, address, flags, regs);
 
-	if (fault_signal_pending(fault, regs))
+	/* Quick path to respond to signals */
+	if (fault_signal_pending(fault, regs)) {
+		if (!user_mode(regs))
+			goto no_context;
 		return;
+	}
 
 	/* The fault is fully completed (including releasing mmap lock) */
 	if (fault & VM_FAULT_COMPLETED)
 		return;
 
-	if (unlikely(fault & VM_FAULT_ERROR)) {
-		if (fault & VM_FAULT_OOM)
-			goto out_of_memory;
-		else if (fault & VM_FAULT_SIGSEGV)
-			goto bad_area;
-		else if (fault & VM_FAULT_SIGBUS)
-			goto do_sigbus;
-		BUG();
-	}
-
-	if (fault & VM_FAULT_RETRY) {
+	/*
+	 * Fault retry nuances, mmap_lock already relinquished by core mm
+	 */
+	if (unlikely(fault & VM_FAULT_RETRY)) {
 		flags |= FAULT_FLAG_TRIED;
-
-		/* No need to mmap_read_unlock(mm) as we would
-		 * have already released it in __lock_page_or_retry
-		 * in mm/filemap.c.
-		 */
-
 		goto retry;
 	}
 
+bad_area:
 	mmap_read_unlock(mm);
 
-	return;
+bad_area_nosemaphore:
+	/*
+	 * Major/minor page fault accounting
+	 * (in case of retry we only land here once)
+	 */
+	if (likely(!(fault & VM_FAULT_ERROR)))
+		/* Normal return path: fault Handled Gracefully */
+		return;
 
-	/* Something tried to access memory that isn't in our memory map.
-	   Fix it, but check if it's kernel or user first.  */
- bad_area:
-	mmap_read_unlock(mm);
+	if (!user_mode(regs))
+		goto no_context;
 
- bad_area_nosemaphore:
-	if (user_mode(regs))
-		goto do_sigsegv;
-
- no_context:
-	/* Are we prepared to handle this fault as an exception?  */
-	if ((fixup = search_exception_tables(regs->pc)) != 0) {
-		unsigned long newpc;
-		newpc = fixup_exception(dpf_reg, fixup, regs->pc);
-		regs->pc = newpc;
+	if (fault & VM_FAULT_OOM) {
+		pagefault_out_of_memory();
 		return;
 	}
 
-	/* Oops. The kernel tried to access some bad page. We'll have to
-	   terminate things with extreme prejudice.  */
-	printk(KERN_ALERT "Unable to handle kernel paging request at "
-	       "virtual address %016lx\n", address);
-	die_if_kernel("Oops", regs, cause, (unsigned long*)regs - 16);
-	make_task_dead(SIGKILL);
-
-	/* We ran out of memory, or some other thing happened to us that
-	   made us unable to handle the page fault gracefully.  */
- out_of_memory:
-	mmap_read_unlock(mm);
-	if (!user_mode(regs))
-		goto no_context;
-	pagefault_out_of_memory();
-	return;
-
- do_sigbus:
-	mmap_read_unlock(mm);
-	/* Send a sigbus, regardless of whether we were in kernel
-	   or user mode.  */
-	force_sig_fault(SIGBUS, BUS_ADRERR, (void __user *) address);
-	if (!user_mode(regs))
-		goto no_context;
-	return;
-
- do_sigsegv:
-	force_sig_fault(SIGSEGV, si_code, (void __user *) address);
-	return;
-
-#ifdef CONFIG_ALPHA_LARGE_VMALLOC
- vmalloc_fault:
-	if (user_mode(regs))
-		goto do_sigsegv;
-	else {
-		/* Synchronize this task's top level page-table
-		   with the "reference" page table from init.  */
-		long index = pgd_index(address);
-		pgd_t *pgd, *pgd_k;
-
-		pgd = current->active_mm->pgd + index;
-		pgd_k = swapper_pg_dir + index;
-		if (!pgd_present(*pgd) && pgd_present(*pgd_k)) {
-			pgd_val(*pgd) = pgd_val(*pgd_k);
-			return;
-		}
-		goto no_context;
+	if (fault & VM_FAULT_SIGBUS) {
+		sig = SIGBUS;
+		si_code = BUS_ADRERR;
 	}
-#endif
+	else {
+		sig = SIGSEGV;
+	}
+
+	tsk->thread.fault_address = address;
+	force_sig_fault(sig, si_code, (void __user *)address);
+	return;
+
+no_context:
+	if (fixup_exception(regs))
+		return;
+
+	die("Oops", regs, address);
 }

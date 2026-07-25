@@ -1,676 +1,563 @@
-# SPDX-License-Identifier: GPL-2.0
-config ALPHA
-	bool
-	default y
-	select ARCH_32BIT_USTAT_F_TINODE
-	select ARCH_MIGHT_HAVE_PC_PARPORT
-	select ARCH_MIGHT_HAVE_PC_SERIO
-	select ARCH_NO_PREEMPT
-	select ARCH_NO_SG_CHAIN
-	select ARCH_USE_CMPXCHG_LOCKREF
-	select DMA_OPS if PCI
-	select FORCE_PCI if !ALPHA_JENSEN
-	select PCI_DOMAINS if PCI
-	select PCI_SYSCALL if PCI
-	select HAVE_ASM_MODVERSIONS
-	select HAVE_PCSPKR_PLATFORM
-	select HAVE_PERF_EVENTS
-	select NEED_DMA_MAP_STATE
-	select NEED_SG_DMA_LENGTH
-	select GENERIC_IRQ_PROBE
-	select GENERIC_PCI_IOMAP
-	select AUTO_IRQ_AFFINITY if SMP
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
+#
+
+config ARC
+	def_bool y
+	select ARC_TIMERS
+	select ARCH_HAS_CACHE_LINE_SIZE
+	select ARCH_HAS_DEBUG_VM_PGTABLE
+	select ARCH_HAS_DMA_PREP_COHERENT
+	select ARCH_HAS_PTE_SPECIAL
+	select ARCH_HAS_SETUP_DMA_OPS
+	select ARCH_HAS_SYNC_DMA_FOR_CPU
+	select ARCH_HAS_SYNC_DMA_FOR_DEVICE
+	select ARCH_SUPPORTS_ATOMIC_RMW if ARC_HAS_LLSC
+	select ARCH_32BIT_OFF_T
+	select BUILDTIME_TABLE_SORT
+	select CLONE_BACKWARDS
+	select COMMON_CLK
+	select DMA_DIRECT_REMAP
+	select GENERIC_ATOMIC64 if !ISA_ARCV2 || !(ARC_HAS_LL64 && ARC_HAS_LLSC)
+	# for now, we don't need GENERIC_IRQ_PROBE, CONFIG_GENERIC_IRQ_CHIP
 	select GENERIC_IRQ_SHOW
-	select ARCH_WANT_IPC_PARSE_VERSION
-	select ARCH_HAVE_NMI_SAFE_CMPXCHG
-	select AUDIT_ARCH
-	select GENERIC_CPU_VULNERABILITIES
+	select GENERIC_PCI_IOMAP
+	select GENERIC_PENDING_IRQ if SMP
+	select GENERIC_SCHED_CLOCK
 	select GENERIC_SMP_IDLE_THREAD
-	select HAVE_ARCH_AUDITSYSCALL
+	select HAVE_ARCH_KGDB
+	select HAVE_ARCH_TRACEHOOK
+	select HAVE_ARCH_TRANSPARENT_HUGEPAGE if ARC_MMU_V4
+	select HAVE_DEBUG_STACKOVERFLOW
+	select HAVE_DEBUG_KMEMLEAK
+	select HAVE_IOREMAP_PROT
+	select HAVE_KERNEL_GZIP
+	select HAVE_KERNEL_LZMA
+	select HAVE_KPROBES
+	select HAVE_KRETPROBES
+	select HAVE_REGS_AND_STACK_ACCESS_API
 	select HAVE_MOD_ARCH_SPECIFIC
+	select HAVE_PERF_EVENTS
+	select HAVE_SYSCALL_TRACEPOINTS
+	select IRQ_DOMAIN
 	select LOCK_MM_AND_FIND_VMA
 	select MODULES_USE_ELF_RELA
-	select ODD_RT_SIGACTION
-	select OLD_SIGSUSPEND
-	select CPU_NO_EFFICIENT_FFS if !ALPHA_EV67
-	select MMU_GATHER_NO_RANGE
-	select SPARSEMEM_EXTREME if SPARSEMEM
-	select ZONE_DMA
-	help
-	  The Alpha is a 64-bit general-purpose processor designed and
-	  marketed by the Digital Equipment Corporation of blessed memory,
-	  now Hewlett-Packard.  The Alpha Linux project has a home page at
-	  <http://www.alphalinux.org/>.
+	select OF
+	select OF_EARLY_FLATTREE
+	select PCI_SYSCALL if PCI
+	select PERF_USE_VMALLOC if ARC_CACHE_VIPT_ALIASING
+	select HAVE_ARCH_JUMP_LABEL if ISA_ARCV2 && !CPU_ENDIAN_BE32
+	select TRACE_IRQFLAGS_SUPPORT
 
-config 64BIT
+config LOCKDEP_SUPPORT
+	def_bool y
+
+config SCHED_OMIT_FRAME_POINTER
+	def_bool y
+
+config GENERIC_CSUM
+	def_bool y
+
+config ARCH_FLATMEM_ENABLE
 	def_bool y
 
 config MMU
-	bool
-	default y
-
-config ARCH_HAS_ILOG2_U32
-	bool
-	default n
-
-config ARCH_HAS_ILOG2_U64
-	bool
-	default n
-
-config GENERIC_CALIBRATE_DELAY
-	bool
-	default y
-
-config GENERIC_ISA_DMA
-	bool
-	default y
-
-config PGTABLE_LEVELS
-	int
-	default 3
-
-config AUDIT_ARCH
-	bool
-
-menu "System setup"
-
-choice
-	prompt "Alpha system type"
-	default ALPHA_GENERIC
-	help
-	  This is the system type of your hardware.  A "generic" kernel will
-	  run on any supported Alpha system. However, if you configure a
-	  kernel for your specific system, it will be faster and smaller.
-
-	  To find out what type of Alpha system you have, you may want to
-	  check out the Linux/Alpha FAQ, accessible on the WWW from
-	  <http://www.alphalinux.org/>. In summary:
-
-	  Alcor/Alpha-XLT     AS 600, AS 500, XL-300, XL-366
-	  Alpha-XL            XL-233, XL-266
-	  AlphaBook1          Alpha laptop
-	  Avanti              AS 200, AS 205, AS 250, AS 255, AS 300, AS 400
-	  Cabriolet           AlphaPC64, AlphaPCI64
-	  DP264               DP264 / DS20 / ES40 / DS10 / DS10L
-	  EB164               EB164 21164 evaluation board
-	  EB64+               EB64+ 21064 evaluation board
-	  EB66                EB66 21066 evaluation board
-	  EB66+               EB66+ 21066 evaluation board
-	  Jensen              DECpc 150, DEC 2000 models 300, 500
-	  LX164               AlphaPC164-LX
-	  Lynx                AS 2100A
-	  Miata               Personal Workstation 433/500/600 a/au
-	  Marvel              AlphaServer ES47 / ES80 / GS1280
-	  Mikasa              AS 1000
-	  Noname              AXPpci33, UDB (Multia)
-	  Noritake            AS 1000A, AS 600A, AS 800
-	  PC164               AlphaPC164
-	  Rawhide             AS 1200, AS 4000, AS 4100
-	  Ruffian             RPX164-2, AlphaPC164-UX, AlphaPC164-BX
-	  SX164               AlphaPC164-SX
-	  Sable               AS 2000, AS 2100
-	  Shark               DS 20L
-	  Takara              Takara (OEM)
-	  Titan               AlphaServer ES45 / DS25 / DS15
-	  Wildfire            AlphaServer GS 40/80/160/320
-
-	  If you don't know what to do, choose "generic".
-
-config ALPHA_GENERIC
-	bool "Generic"
-	depends on TTY
-	select HAVE_EISA
-	help
-	  A generic kernel will run on all supported Alpha hardware.
-
-config ALPHA_ALCOR
-	bool "Alcor/Alpha-XLT"
-	select HAVE_EISA
-	help
-	  For systems using the Digital ALCOR chipset: 5 chips (4, 64-bit data
-	  slices (Data Switch, DSW) - 208-pin PQFP and 1 control (Control, I/O
-	  Address, CIA) - a 383 pin plastic PGA).  It provides a DRAM
-	  controller (256-bit memory bus) and a PCI interface.  It also does
-	  all the work required to support an external Bcache and to maintain
-	  memory coherence when a PCI device DMAs into (or out of) memory.
-
-config ALPHA_XL
-	bool "Alpha-XL"
-	help
-	  XL-233 and XL-266-based Alpha systems.
-
-config ALPHA_BOOK1
-	bool "AlphaBook1"
-	help
-	  Dec AlphaBook1/Burns Alpha-based laptops.
-
-config ALPHA_AVANTI_CH
-	bool "Avanti"
-
-config ALPHA_CABRIOLET
-	bool "Cabriolet"
-	help
-	  Cabriolet AlphaPC64, AlphaPCI64 systems.  Derived from EB64+ but now
-	  baby-AT with Flash boot ROM, no on-board SCSI or Ethernet. 3 ISA
-	  slots, 4 PCI slots (one pair are on a shared slot), uses plug-in
-	  Bcache SIMMs.  Requires power supply with 3.3V output.
-
-config ALPHA_DP264
-	bool "DP264"
-	help
-	  Various 21264 systems with the tsunami core logic chipset.
-	  API Networks: 264DP, UP2000(+), CS20;
-	  Compaq: DS10(E,L), XP900, XP1000, DS20(E), ES40.
-
-config ALPHA_EB164
-	bool "EB164"
-	help
-	  EB164 21164 evaluation board from DEC.  Uses 21164 and ALCOR.  Has
-	  ISA and PCI expansion (3 ISA slots, 2 64-bit PCI slots (one is
-	  shared with an ISA slot) and 2 32-bit PCI slots.  Uses plus-in
-	  Bcache SIMMs. I/O sub-system provides SuperI/O (2S, 1P, FD), KBD,
-	  MOUSE (PS2 style), RTC/NVRAM.  Boot ROM is Flash.  PC-AT-sized
-	  motherboard.  Requires power supply with 3.3V output.
-
-config ALPHA_EB64P_CH
-	bool "EB64+"
-
-config ALPHA_EB66
-	bool "EB66"
-	help
-	  A Digital DS group board.  Uses 21066 or 21066A.  I/O sub-system is
-	  identical to EB64+.  Baby PC-AT size.  Runs from standard PC power
-	  supply.  The EB66 schematic was published as a marketing poster
-	  advertising the 21066 as "the first microprocessor in the world with
-	  embedded PCI".
-
-config ALPHA_EB66P
-	bool "EB66+"
-	help
-	  Later variant of the EB66 board.
-
-config ALPHA_EIGER
-	bool "Eiger"
-	help
-	  Apparently an obscure OEM single-board computer based on the
-	  Typhoon/Tsunami chipset family. Information on it is scanty.
-
-config ALPHA_JENSEN
-	bool "Jensen"
-	select HAVE_EISA
-	help
-	  DEC PC 150 AXP (aka Jensen): This is a very old Digital system - one
-	  of the first-generation Alpha systems. A number of these systems
-	  seem to be available on the second- hand market. The Jensen is a
-	  floor-standing tower system which originally used a 150MHz 21064 It
-	  used programmable logic to interface a 486 EISA I/O bridge to the
-	  CPU.
-
-config ALPHA_LX164
-	bool "LX164"
-	help
-	  A technical overview of this board is available at
-	  <http://www.unix-ag.org/Linux-Alpha/Architectures/LX164.html>.
-
-config ALPHA_LYNX
-	bool "Lynx"
-	select HAVE_EISA
-	help
-	  AlphaServer 2100A-based systems.
-
-config ALPHA_MARVEL
-	bool "Marvel"
-	help
-	  AlphaServer ES47 / ES80 / GS1280 based on EV7.
-
-config ALPHA_MIATA
-	bool "Miata"
-	select HAVE_EISA
-	help
-	  The Digital PersonalWorkStation (PWS 433a, 433au, 500a, 500au, 600a,
-	  or 600au).
-
-config ALPHA_MIKASA
-	bool "Mikasa"
-	help
-	  AlphaServer 1000-based Alpha systems.
-
-config ALPHA_NAUTILUS
-	bool "Nautilus"
-	help
-	  Alpha systems based on the AMD 751 & ALI 1543C chipsets.
-
-config ALPHA_NONAME_CH
-	bool "Noname"
-
-config ALPHA_NORITAKE
-	bool "Noritake"
-	select HAVE_EISA
-	help
-	  AlphaServer 1000A, AlphaServer 600A, and AlphaServer 800-based
-	  systems.
-
-config ALPHA_PC164
-	bool "PC164"
-
-config ALPHA_P2K
-	bool "Platform2000"
-
-config ALPHA_RAWHIDE
-	bool "Rawhide"
-	select HAVE_EISA
-	help
-	  AlphaServer 1200, AlphaServer 4000 and AlphaServer 4100 machines.
-	  See HOWTO at
-	  <http://www.alphalinux.org/docs/rawhide/4100_install.shtml>.
-
-config ALPHA_RUFFIAN
-	bool "Ruffian"
-	help
-	  Samsung APC164UX.  There is a page on known problems and workarounds
-	  at <http://www.alphalinux.org/faq/FAQ-11.html>.
-
-config ALPHA_RX164
-	bool "RX164"
-
-config ALPHA_SX164
-	bool "SX164"
-
-config ALPHA_SABLE
-	bool "Sable"
-	select HAVE_EISA
-	help
-	  Digital AlphaServer 2000 and 2100-based systems.
-
-config ALPHA_SHARK
-	bool "Shark"
-
-config ALPHA_TAKARA
-	bool "Takara"
-	help
-	  Alpha 11164-based OEM single-board computer.
-
-config ALPHA_TITAN
-	bool "Titan"
-	help
-	  AlphaServer ES45/DS25 SMP based on EV68 and Titan chipset.
-
-config ALPHA_WILDFIRE
-	bool "Wildfire"
-	help
-	  AlphaServer GS 40/80/160/320 SMP based on the EV67 core.
-
-endchoice
-
-# clear all implied options (don't want default values for those):
-# Most of these machines have ISA slots; not exactly sure which don't,
-# and this doesn't activate hordes of code, so do it always.
-config ISA
-	bool
-	default y
-	help
-	  Find out whether you have ISA slots on your motherboard.  ISA is the
-	  name of a bus system, i.e. the way the CPU talks to the other stuff
-	  inside your box.  Other bus systems are PCI, EISA, MicroChannel
-	  (MCA) or VESA.  ISA is an older system, now being displaced by PCI;
-	  newer boards don't support it.  If you have ISA, say Y, otherwise N.
-
-config ISA_DMA_API
-	bool
-	default y
-
-config ALPHA_NONAME
-	bool
-	depends on ALPHA_BOOK1 || ALPHA_NONAME_CH
-	default y
-	help
-	  The AXPpci33 (aka NoName), is based on the EB66 (includes the Multia
-	  UDB).  This design was produced by Digital's Technical OEM (TOEM)
-	  group. It uses the 21066 processor running at 166MHz or 233MHz. It
-	  is a baby-AT size, and runs from a standard PC power supply. It has
-	  5 ISA slots and 3 PCI slots (one pair are a shared slot). There are
-	  2 versions, with either PS/2 or large DIN connectors for the
-	  keyboard.
-
-config ALPHA_EV4
-	bool
-	depends on ALPHA_JENSEN || (ALPHA_SABLE && !ALPHA_GAMMA) || ALPHA_LYNX || ALPHA_NORITAKE && !ALPHA_PRIMO || ALPHA_MIKASA && !ALPHA_PRIMO || ALPHA_CABRIOLET || ALPHA_AVANTI_CH || ALPHA_EB64P_CH || ALPHA_XL || ALPHA_NONAME || ALPHA_EB66 || ALPHA_EB66P || ALPHA_P2K
-	default y if !ALPHA_LYNX
-
-config ALPHA_LCA
-	bool
-	depends on ALPHA_NONAME || ALPHA_EB66 || ALPHA_EB66P || ALPHA_P2K
-	default y
-
-config ALPHA_APECS
-	bool
-	depends on !ALPHA_PRIMO && (ALPHA_NORITAKE || ALPHA_MIKASA) || ALPHA_CABRIOLET || ALPHA_AVANTI_CH || ALPHA_EB64P_CH || ALPHA_XL
-	default y
-
-config ALPHA_EB64P
-	bool
-	depends on ALPHA_CABRIOLET || ALPHA_EB64P_CH
-	default y
-	help
-	  Uses 21064 or 21064A and APECs.  Has ISA and PCI expansion (3 ISA,
-	  2 PCI, one pair are on a shared slot). Supports 36-bit DRAM SIMs.
-	  ISA bus generated by Intel SaturnI/O PCI-ISA bridge. On-board SCSI
-	  (NCR 810 on PCI) Ethernet (Digital 21040), KBD, MOUSE (PS2 style),
-	  SuperI/O (2S, 1P, FD), RTC/NVRAM. Boot ROM is EPROM.  PC-AT size.
-	  Runs from standard PC power supply.
-
-config ALPHA_EV5
-	bool "EV5 CPU(s) (model 5/xxx)?" if ALPHA_LYNX
-	default y if ALPHA_RX164 || ALPHA_RAWHIDE || ALPHA_MIATA || ALPHA_LX164 || ALPHA_SX164 || ALPHA_RUFFIAN || ALPHA_SABLE && ALPHA_GAMMA || ALPHA_NORITAKE && ALPHA_PRIMO || ALPHA_MIKASA && ALPHA_PRIMO || ALPHA_PC164 || ALPHA_TAKARA || ALPHA_EB164 || ALPHA_ALCOR
-
-config ALPHA_EV4
-	bool
-	default y if ALPHA_LYNX && !ALPHA_EV5
-
-config ALPHA_CIA
-	bool
-	depends on ALPHA_MIATA || ALPHA_LX164 || ALPHA_SX164 || ALPHA_RUFFIAN || ALPHA_NORITAKE && ALPHA_PRIMO || ALPHA_MIKASA && ALPHA_PRIMO || ALPHA_PC164 || ALPHA_TAKARA || ALPHA_EB164 || ALPHA_ALCOR
-	default y
-
-config ALPHA_EV56
-	bool "EV56 CPU (speed >= 366MHz)?" if ALPHA_ALCOR
-	default y if ALPHA_RX164 || ALPHA_MIATA || ALPHA_LX164 || ALPHA_SX164 || ALPHA_RUFFIAN || ALPHA_PC164 || ALPHA_TAKARA
-
-config ALPHA_EV56
-	prompt "EV56 CPU (speed >= 333MHz)?"
-	depends on ALPHA_NORITAKE || ALPHA_PRIMO
-
-config ALPHA_EV56
-	prompt "EV56 CPU (speed >= 400MHz)?"
-	depends on ALPHA_RAWHIDE
-
-config ALPHA_PRIMO
-	bool "EV5 CPU daughtercard (model 5/xxx)?"
-	depends on ALPHA_NORITAKE || ALPHA_MIKASA
-	help
-	  Say Y if you have an AS 1000 5/xxx or an AS 1000A 5/xxx.
-
-config ALPHA_GAMMA
-	bool "EV5 CPU(s) (model 5/xxx)?"
-	depends on ALPHA_SABLE
-	help
-	  Say Y if you have an AS 2000 5/xxx or an AS 2100 5/xxx.
-
-config ALPHA_GAMMA
-	bool
-	depends on ALPHA_LYNX
-	default y
-
-config ALPHA_T2
-	bool
-	depends on ALPHA_SABLE || ALPHA_LYNX
-	default y
-
-config ALPHA_PYXIS
-	bool
-	depends on ALPHA_MIATA || ALPHA_LX164 || ALPHA_SX164 || ALPHA_RUFFIAN
-	default y
-
-config ALPHA_EV6
-	bool
-	depends on ALPHA_NAUTILUS || ALPHA_WILDFIRE || ALPHA_TITAN || ALPHA_SHARK || ALPHA_DP264 || ALPHA_EIGER || ALPHA_MARVEL
-	default y
-
-config ALPHA_TSUNAMI
-	bool
-	depends on ALPHA_SHARK || ALPHA_DP264 || ALPHA_EIGER
-	default y
-
-config ALPHA_EV67
-	bool "EV67 (or later) CPU (speed > 600MHz)?" if ALPHA_DP264 || ALPHA_EIGER
-	default y if ALPHA_NAUTILUS || ALPHA_WILDFIRE || ALPHA_TITAN || ALPHA_SHARK || ALPHA_MARVEL
-	help
-	  Is this a machine based on the EV67 core?  If in doubt, select N here
-	  and the machine will be treated as an EV6.
-
-config ALPHA_MCPCIA
-	bool
-	depends on ALPHA_RAWHIDE
-	default y
-
-config ALPHA_POLARIS
-	bool
-	depends on ALPHA_RX164
-	default y
-
-config ALPHA_IRONGATE
-	bool
-	depends on ALPHA_NAUTILUS
-	default y
-
-config GENERIC_HWEIGHT
-	bool
-	default y if !ALPHA_EV67
-
-config ALPHA_AVANTI
-	bool
-	depends on ALPHA_XL || ALPHA_AVANTI_CH
-	default y
-	help
-	  Avanti AS 200, AS 205, AS 250, AS 255, AS 300, and AS 400-based
-	  Alphas. Info at
-	  <http://www.unix-ag.org/Linux-Alpha/Architectures/Avanti.html>.
-
-config ALPHA_BROKEN_IRQ_MASK
-	bool
-	depends on ALPHA_GENERIC || ALPHA_PC164
-	default y
-
-config VGA_HOSE
-	bool
-	depends on VGA_CONSOLE && (ALPHA_GENERIC || ALPHA_TITAN || ALPHA_MARVEL || ALPHA_TSUNAMI)
-	default y
-	help
-	  Support VGA on an arbitrary hose; needed for several platforms
-	  which always have multiple hoses, and whose consoles support it.
-
-
-config ALPHA_QEMU
-	bool "Run under QEMU emulation"
-	depends on !ALPHA_GENERIC
-	help
-	  Assume the presence of special features supported by QEMU PALcode
-	  that reduce the overhead of system emulation.
-
-	  Generic kernels will auto-detect QEMU.  But when building a
-	  system-specific kernel, the assumption is that we want to
-	  eliminate as many runtime tests as possible.
-
-	  If unsure, say N.
-
-
-config ALPHA_SRM
-	bool "Use SRM as bootloader" if ALPHA_CABRIOLET || ALPHA_AVANTI_CH || ALPHA_EB64P || ALPHA_PC164 || ALPHA_TAKARA || ALPHA_EB164 || ALPHA_ALCOR || ALPHA_MIATA || ALPHA_LX164 || ALPHA_SX164 || ALPHA_NAUTILUS || ALPHA_NONAME
-	depends on TTY
-	default y if ALPHA_JENSEN || ALPHA_MIKASA || ALPHA_SABLE || ALPHA_LYNX || ALPHA_NORITAKE || ALPHA_DP264 || ALPHA_RAWHIDE || ALPHA_EIGER || ALPHA_WILDFIRE || ALPHA_TITAN || ALPHA_SHARK || ALPHA_MARVEL
-	help
-	  There are two different types of booting firmware on Alphas: SRM,
-	  which is command line driven, and ARC, which uses menus and arrow
-	  keys. Details about the Linux/Alpha booting process are contained in
-	  the Linux/Alpha FAQ, accessible on the WWW from
-	  <http://www.alphalinux.org/>.
-
-	  The usual way to load Linux on an Alpha machine is to use MILO
-	  (a bootloader that lets you pass command line parameters to the
-	  kernel just like lilo does for the x86 architecture) which can be
-	  loaded either from ARC or can be installed directly as a permanent
-	  firmware replacement from floppy (which requires changing a certain
-	  jumper on the motherboard). If you want to do either of these, say N
-	  here. If MILO doesn't work on your system (true for Jensen
-	  motherboards), you can bypass it altogether and boot Linux directly
-	  from an SRM console; say Y here in order to do that. Note that you
-	  won't be able to boot from an IDE disk using SRM.
-
-	  If unsure, say N.
-
-config ARCH_MAY_HAVE_PC_FDC
 	def_bool y
 
-config SMP
-	bool "Symmetric multi-processing support"
-	depends on ALPHA_SABLE || ALPHA_LYNX || ALPHA_RAWHIDE || ALPHA_DP264 || ALPHA_WILDFIRE || ALPHA_TITAN || ALPHA_GENERIC || ALPHA_SHARK || ALPHA_MARVEL
-	help
-	  This enables support for systems with more than one CPU. If you have
-	  a system with only one CPU, say N. If you have a system with more
-	  than one CPU, say Y.
+config NO_IOPORT_MAP
+	def_bool y
 
-	  If you say N here, the kernel will run on uni- and multiprocessor
-	  machines, but will use only one CPU of a multiprocessor machine. If
-	  you say Y here, the kernel will run on many, but not all,
-	  uniprocessor machines. On a uniprocessor machine, the kernel
-	  will run faster if you say N here.
+config GENERIC_CALIBRATE_DELAY
+	def_bool y
 
-	  See also the SMP-HOWTO available at
-	  <https://www.tldp.org/docs.html#howto>.
+config GENERIC_HWEIGHT
+	def_bool y
 
-	  If you don't know what to do here, say N.
+config STACKTRACE_SUPPORT
+	def_bool y
+	select STACKTRACE
 
-config NR_CPUS
-	int "Maximum number of CPUs (2-32)"
-	range 2 32
-	depends on SMP
-	default "32" if ALPHA_GENERIC || ALPHA_MARVEL
-	default "4" if !ALPHA_GENERIC && !ALPHA_MARVEL
-	help
-	  MARVEL support can handle a maximum of 32 CPUs, all the others
-	  with working support have a maximum of 4 CPUs.
+menu "ARC Architecture Configuration"
 
-config ARCH_SPARSEMEM_ENABLE
-	bool "Sparse Memory Support"
-	help
-	  Say Y to support efficient handling of discontiguous physical memory,
-	  for systems that have huge holes in the physical address space.
+menu "ARC Platform/SoC/Board"
 
-config ALPHA_WTINT
-	bool "Use WTINT" if ALPHA_SRM || ALPHA_GENERIC
-	default y if ALPHA_QEMU
-	default n if ALPHA_EV5 || ALPHA_EV56 || (ALPHA_EV4 && !ALPHA_LCA)
-	default n if !ALPHA_SRM && !ALPHA_GENERIC
-	default y if SMP
-	help
-	  The Wait for Interrupt (WTINT) PALcall attempts to place the CPU
-	  to sleep until the next interrupt.  This may reduce the power
-	  consumed, and the heat produced by the computer.  However, it has
-	  the side effect of making the cycle counter unreliable as a timing
-	  device across the sleep.
-
-	  For emulation under QEMU, definitely say Y here, as we have other
-	  mechanisms for measuring time than the cycle counter.
-
-	  For EV4 (but not LCA), EV5 and EV56 systems, or for systems running
-	  MILO, sleep mode is not supported so you might as well say N here.
-
-	  For SMP systems we cannot use the cycle counter for timing anyway,
-	  so you might as well say Y here.
-
-	  If unsure, say N.
-
-# LARGE_VMALLOC is racy, if you *really* need it then fix it first
-config ALPHA_LARGE_VMALLOC
-	bool
-	help
-	  Process creation and other aspects of virtual memory management can
-	  be streamlined if we restrict the kernel to one PGD for all vmalloc
-	  allocations.  This equates to about 8GB.
-
-	  Under normal circumstances, this is so far and above what is needed
-	  as to be laughable.  However, there are certain applications (such
-	  as benchmark-grade in-kernel web serving) that can make use of as
-	  much vmalloc space as is available.
-
-	  Say N unless you know you need gobs and gobs of vmalloc space.
-
-config VERBOSE_MCHECK
-	bool "Verbose Machine Checks"
-
-config VERBOSE_MCHECK_ON
-	int "Verbose Printing Mode (0=off, 1=on, 2=all)"
-	depends on VERBOSE_MCHECK
-	default 1
-	help
-	  This option allows the default printing mode to be set, and then
-	  possibly overridden by a boot command argument.
-
-	  For example, if one wanted the option of printing verbose
-	  machine checks, but wanted the default to be as if verbose
-	  machine check printing was turned off, then one would choose
-	  the printing mode to be 0. Then, upon reboot, one could add
-	  the boot command line "verbose_mcheck=1" to get the normal
-	  verbose machine check printing, or "verbose_mcheck=2" to get
-	  the maximum information available.
-
-	  Take the default (1) unless you want more control or more info.
-
-choice
-	prompt "Timer interrupt frequency (HZ)?"
-	default HZ_128 if ALPHA_QEMU
-	default HZ_1200 if ALPHA_RAWHIDE
-	default HZ_1024
-	help
-	  The frequency at which timer interrupts occur.  A high frequency
-	  minimizes latency, whereas a low frequency minimizes overhead of
-	  process accounting.  The later effect is especially significant
-	  when being run under QEMU.
-
-	  Note that some Alpha hardware cannot change the interrupt frequency
-	  of the timer.  If unsure, say 1024 (or 1200 for Rawhide).
-
-	config HZ_32
-		bool "32 Hz"
-	config HZ_64
-		bool "64 Hz"
-	config HZ_128
-		bool "128 Hz"
-	config HZ_256
-		bool "256 Hz"
-	config HZ_1024
-		bool "1024 Hz"
-	config HZ_1200
-		bool "1200 Hz"
-endchoice
-
-config HZ
-	int
-	default 32 if HZ_32
-	default 64 if HZ_64
-	default 128 if HZ_128
-	default 256 if HZ_256
-	default 1200 if HZ_1200
-	default 1024
-
-config SRM_ENV
-	tristate "SRM environment through procfs"
-	depends on PROC_FS
-	help
-	  If you enable this option, a subdirectory inside /proc called
-	  /proc/srm_environment will give you access to the all important
-	  SRM environment variables (those which have a name) and also
-	  to all others (by their internal number).
-
-	  SRM is something like a BIOS for Alpha machines. There are some
-	  other such BIOSes, like AlphaBIOS, which this driver cannot
-	  support (hey, that's not SRM!).
-
-	  Despite the fact that this driver doesn't work on all Alphas (but
-	  only on those which have SRM as their firmware), it's save to
-	  build it even if your particular machine doesn't know about SRM
-	  (or if you intend to compile a generic kernel). It will simply
-	  not create those subdirectory in /proc (and give you some warning,
-	  of course).
-
-	  This driver is also available as a module and will be called
-	  srm_env then.
+source "arch/arc/plat-tb10x/Kconfig"
+source "arch/arc/plat-axs10x/Kconfig"
+source "arch/arc/plat-hsdk/Kconfig"
 
 endmenu
 
-# DUMMY_CONSOLE may be defined in drivers/video/console/Kconfig
-# but we also need it if VGA_HOSE is set
-config DUMMY_CONSOLE
-	bool
-	depends on VGA_HOSE
+choice
+	prompt "ARC Instruction Set"
+	default ISA_ARCV2
+
+config ISA_ARCOMPACT
+	bool "ARCompact ISA"
+	select CPU_NO_EFFICIENT_FFS
+	help
+	  The original ARC ISA of ARC600/700 cores
+
+config ISA_ARCV2
+	bool "ARC ISA v2"
+	select ARC_TIMERS_64BIT
+	help
+	  ISA for the Next Generation ARC-HS cores
+
+endchoice
+
+menu "ARC CPU Configuration"
+
+choice
+	prompt "ARC Core"
+	default ARC_CPU_770 if ISA_ARCOMPACT
+	default ARC_CPU_HS if ISA_ARCV2
+
+config ARC_CPU_770
+	bool "ARC770"
+	depends on ISA_ARCOMPACT
+	select ARC_HAS_SWAPE
+	help
+	  Support for ARC770 core introduced with Rel 4.10 (Summer 2011)
+	  This core has a bunch of cool new features:
+	  -MMU-v3: Variable Page Sz (4k, 8k, 16k), bigger J-TLB (128x4)
+	           Shared Address Spaces (for sharing TLB entries in MMU)
+	  -Caches: New Prog Model, Region Flush
+	  -Insns: endian swap, load-locked/store-conditional, time-stamp-ctr
+
+config ARC_CPU_HS
+	bool "ARC-HS"
+	depends on ISA_ARCV2
+	help
+	  Support for ARC HS38x Cores based on ARCv2 ISA
+	  The notable features are:
+	    - SMP configurations of up to 4 cores with coherency
+	    - Optional L2 Cache and IO-Coherency
+	    - Revised Interrupt Architecture (multiple priorites, reg banks,
+	        auto stack switch, auto regfile save/restore)
+	    - MMUv4 (PIPT dcache, Huge Pages)
+	    - Instructions for
+		* 64bit load/store: LDD, STD
+		* Hardware assisted divide/remainder: DIV, REM
+		* Function prologue/epilogue: ENTER_S, LEAVE_S
+		* IRQ enable/disable: CLRI, SETI
+		* pop count: FFS, FLS
+		* SETcc, BMSKN, XBFU...
+
+endchoice
+
+config ARC_TUNE_MCPU
+	string "Override default -mcpu compiler flag"
+	default ""
+	help
+	  Override default -mcpu=xxx compiler flag (which is set depending on
+	  the ISA version) with the specified value.
+	  NOTE: If specified flag isn't supported by current compiler the
+	  ISA default value will be used as a fallback.
+
+config CPU_BIG_ENDIAN
+	bool "Enable Big Endian Mode"
+	help
+	  Build kernel for Big Endian Mode of ARC CPU
+
+config SMP
+	bool "Symmetric Multi-Processing"
+	select ARC_MCIP if ISA_ARCV2
+	help
+	  This enables support for systems with more than one CPU.
+
+if SMP
+
+config NR_CPUS
+	int "Maximum number of CPUs (2-4096)"
+	range 2 4096
+	default "4"
+
+config ARC_SMP_HALT_ON_RESET
+	bool "Enable Halt-on-reset boot mode"
+	help
+	  In SMP configuration cores can be configured as Halt-on-reset
+	  or they could all start at same time. For Halt-on-reset, non
+	  masters are parked until Master kicks them so they can start off
+	  at designated entry point. For other case, all jump to common
+	  entry point and spin wait for Master's signal.
+
+endif #SMP
+
+config ARC_MCIP
+	bool "ARConnect Multicore IP (MCIP) Support "
+	depends on ISA_ARCV2
+	default y if SMP
+	help
+	  This IP block enables SMP in ARC-HS38 cores.
+	  It provides for cross-core interrupts, multi-core debug
+	  hardware semaphores, shared memory,....
+
+menuconfig ARC_CACHE
+	bool "Enable Cache Support"
 	default y
+
+if ARC_CACHE
+
+config ARC_CACHE_LINE_SHIFT
+	int "Cache Line Length (as power of 2)"
+	range 5 7
+	default "6"
+	help
+	  Starting with ARC700 4.9, Cache line length is configurable,
+	  This option specifies "N", with Line-len = 2 power N
+	  So line lengths of 32, 64, 128 are specified by 5,6,7, respectively
+	  Linux only supports same line lengths for I and D caches.
+
+config ARC_HAS_ICACHE
+	bool "Use Instruction Cache"
+	default y
+
+config ARC_HAS_DCACHE
+	bool "Use Data Cache"
+	default y
+
+config ARC_CACHE_PAGES
+	bool "Per Page Cache Control"
+	default y
+	depends on ARC_HAS_ICACHE || ARC_HAS_DCACHE
+	help
+	  This can be used to over-ride the global I/D Cache Enable on a
+	  per-page basis (but only for pages accessed via MMU such as
+	  Kernel Virtual address or User Virtual Address)
+	  TLB entries have a per-page Cache Enable Bit.
+	  Note that Global I/D ENABLE + Per Page DISABLE works but corollary
+	  Global DISABLE + Per Page ENABLE won't work
+
+config ARC_CACHE_VIPT_ALIASING
+	bool "Support VIPT Aliasing D$"
+	depends on ARC_HAS_DCACHE && ISA_ARCOMPACT
+
+endif #ARC_CACHE
+
+config ARC_HAS_ICCM
+	bool "Use ICCM"
+	help
+	  Single Cycle RAMS to store Fast Path Code
+
+config ARC_ICCM_SZ
+	int "ICCM Size in KB"
+	default "64"
+	depends on ARC_HAS_ICCM
+
+config ARC_HAS_DCCM
+	bool "Use DCCM"
+	help
+	  Single Cycle RAMS to store Fast Path Data
+
+config ARC_DCCM_SZ
+	int "DCCM Size in KB"
+	default "64"
+	depends on ARC_HAS_DCCM
+
+config ARC_DCCM_BASE
+	hex "DCCM map address"
+	default "0xA0000000"
+	depends on ARC_HAS_DCCM
+
+choice
+	prompt "MMU Version"
+	default ARC_MMU_V3 if ISA_ARCOMPACT
+	default ARC_MMU_V4 if ISA_ARCV2
+
+config ARC_MMU_V3
+	bool "MMU v3"
+	depends on ISA_ARCOMPACT
+	help
+	  Introduced with ARC700 4.10: New Features
+	  Variable Page size (1k-16k), var JTLB size 128 x (2 or 4)
+	  Shared Address Spaces (SASID)
+
+config ARC_MMU_V4
+	bool "MMU v4"
+	depends on ISA_ARCV2
+
+endchoice
+
+
+choice
+	prompt "MMU Page Size"
+	default ARC_PAGE_SIZE_8K
+
+config ARC_PAGE_SIZE_8K
+	bool "8KB"
+	help
+	  Choose between 8k vs 16k
+
+config ARC_PAGE_SIZE_16K
+	bool "16KB"
+
+config ARC_PAGE_SIZE_4K
+	bool "4KB"
+	depends on ARC_MMU_V3 || ARC_MMU_V4
+
+endchoice
+
+choice
+	prompt "MMU Super Page Size"
+	depends on ISA_ARCV2 && TRANSPARENT_HUGEPAGE
+	default ARC_HUGEPAGE_2M
+
+config ARC_HUGEPAGE_2M
+	bool "2MB"
+
+config ARC_HUGEPAGE_16M
+	bool "16MB"
+
+endchoice
+
+config PGTABLE_LEVELS
+	int "Number of Page table levels"
+	default 2
+
+config ARC_COMPACT_IRQ_LEVELS
+	depends on ISA_ARCOMPACT
+	bool "Setup Timer IRQ as high Priority"
+	# if SMP, LV2 enabled ONLY if ARC implementation has LV2 re-entrancy
+	depends on !SMP
+
+config ARC_FPU_SAVE_RESTORE
+	bool "Enable FPU state persistence across context switch"
+	help
+	  ARCompact FPU has internal registers to assist with Double precision
+	  Floating Point operations. There are control and stauts registers
+	  for floating point exceptions and rounding modes. These are
+	  preserved across task context switch when enabled.
+
+config ARC_CANT_LLSC
+	def_bool n
+
+config ARC_HAS_LLSC
+	bool "Insn: LLOCK/SCOND (efficient atomic ops)"
+	default y
+	depends on !ARC_CANT_LLSC
+
+config ARC_HAS_SWAPE
+	bool "Insn: SWAPE (endian-swap)"
+	default y
+
+if ISA_ARCV2
+
+config ARC_USE_UNALIGNED_MEM_ACCESS
+	bool "Enable unaligned access in HW"
+	default y
+	select HAVE_EFFICIENT_UNALIGNED_ACCESS
+	help
+	  The ARC HS architecture supports unaligned memory access
+	  which is disabled by default. Enable unaligned access in
+	  hardware and use software to use it
+
+config ARC_HAS_LL64
+	bool "Insn: 64bit LDD/STD"
+	help
+	  Enable gcc to generate 64-bit load/store instructions
+	  ISA mandates even/odd registers to allow encoding of two
+	  dest operands with 2 possible source operands.
+	default y
+
+config ARC_HAS_DIV_REM
+	bool "Insn: div, divu, rem, remu"
+	default y
+
+config ARC_HAS_ACCL_REGS
+	bool "Reg Pair ACCL:ACCH (FPU and/or MPY > 6 and/or DSP)"
+	default y
+	help
+	  Depending on the configuration, CPU can contain accumulator reg-pair
+	  (also referred to as r58:r59). These can also be used by gcc as GPR so
+	  kernel needs to save/restore per process
+
+config ARC_DSP_HANDLED
+	def_bool n
+
+config ARC_DSP_SAVE_RESTORE_REGS
+	def_bool n
+
+choice
+	prompt "DSP support"
+	default ARC_DSP_NONE
+	help
+	  Depending on the configuration, CPU can contain DSP registers
+	  (ACC0_GLO, ACC0_GHI, DSP_BFLY0, DSP_CTRL, DSP_FFT_CTRL).
+	  Below are options describing how to handle these registers in
+	  interrupt entry / exit and in context switch.
+
+config ARC_DSP_NONE
+	bool "No DSP extension presence in HW"
+	help
+	  No DSP extension presence in HW
+
+config ARC_DSP_KERNEL
+	bool "DSP extension in HW, no support for userspace"
+	select ARC_HAS_ACCL_REGS
+	select ARC_DSP_HANDLED
+	help
+	  DSP extension presence in HW, no support for DSP-enabled userspace
+	  applications. We don't save / restore DSP registers and only do
+	  some minimal preparations so userspace won't be able to break kernel
+
+config ARC_DSP_USERSPACE
+	bool "Support DSP for userspace apps"
+	select ARC_HAS_ACCL_REGS
+	select ARC_DSP_HANDLED
+	select ARC_DSP_SAVE_RESTORE_REGS
+	help
+	  DSP extension presence in HW, support save / restore DSP registers to
+	  run DSP-enabled userspace applications
+
+config ARC_DSP_AGU_USERSPACE
+	bool "Support DSP with AGU for userspace apps"
+	select ARC_HAS_ACCL_REGS
+	select ARC_DSP_HANDLED
+	select ARC_DSP_SAVE_RESTORE_REGS
+	help
+	  DSP and AGU extensions presence in HW, support save / restore DSP
+	  and AGU registers to run DSP-enabled userspace applications
+endchoice
+
+config ARC_IRQ_NO_AUTOSAVE
+	bool "Disable hardware autosave regfile on interrupts"
+	default n
+	help
+	  On HS cores, taken interrupt auto saves the regfile on stack.
+	  This is programmable and can be optionally disabled in which case
+	  software INTERRUPT_PROLOGUE/EPILGUE do the needed work
+
+config ARC_LPB_DISABLE
+	bool "Disable loop buffer (LPB)"
+	help
+	  On HS cores, loop buffer (LPB) is programmable in runtime and can
+	  be optionally disabled.
+
+endif # ISA_ARCV2
+
+endmenu   # "ARC CPU Configuration"
+
+config LINUX_LINK_BASE
+	hex "Kernel link address"
+	default "0x80000000"
+	help
+	  ARC700 divides the 32 bit phy address space into two equal halves
+	  -Lower 2G (0 - 0x7FFF_FFFF ) is user virtual, translated by MMU
+	  -Upper 2G (0x8000_0000 onwards) is untranslated, for kernel
+	  Typically Linux kernel is linked at the start of untransalted addr,
+	  hence the default value of 0x8zs.
+	  However some customers have peripherals mapped at this addr, so
+	  Linux needs to be scooted a bit.
+	  If you don't know what the above means, leave this setting alone.
+	  This needs to match memory start address specified in Device Tree
+
+config LINUX_RAM_BASE
+	hex "RAM base address"
+	default LINUX_LINK_BASE
+	help
+	  By default Linux is linked at base of RAM. However in some special
+	  cases (such as HSDK), Linux can't be linked at start of DDR, hence
+	  this option.
+
+config HIGHMEM
+	bool "High Memory Support"
+	select HAVE_ARCH_PFN_VALID
+	select KMAP_LOCAL
+	help
+	  With ARC 2G:2G address split, only upper 2G is directly addressable by
+	  kernel. Enable this to potentially allow access to rest of 2G and PAE
+	  in future
+
+config ARC_HAS_PAE40
+	bool "Support for the 40-bit Physical Address Extension"
+	depends on ISA_ARCV2
+	select HIGHMEM
+	select PHYS_ADDR_T_64BIT
+	help
+	  Enable access to physical memory beyond 4G, only supported on
+	  ARC cores with 40 bit Physical Addressing support
+
+config ARC_KVADDR_SIZE
+	int "Kernel Virtual Address Space size (MB)"
+	range 0 512
+	default "256"
+	help
+	  The kernel address space is carved out of 256MB of translated address
+	  space for catering to vmalloc, modules, pkmap, fixmap. This however may
+	  not suffice vmalloc requirements of a 4K CPU EZChip system. So allow
+	  this to be stretched to 512 MB (by extending into the reserved
+	  kernel-user gutter)
+
+config ARC_CURR_IN_REG
+	bool "Dedicate Register r25 for current_task pointer"
+	default y
+	help
+	  This reserved Register R25 to point to Current Task in
+	  kernel mode. This saves memory access for each such access
+
+
+config ARC_EMUL_UNALIGNED
+	bool "Emulate unaligned memory access (userspace only)"
+	select SYSCTL_ARCH_UNALIGN_NO_WARN
+	select SYSCTL_ARCH_UNALIGN_ALLOW
+	depends on ISA_ARCOMPACT
+	help
+	  This enables misaligned 16 & 32 bit memory access from user space.
+	  Use ONLY-IF-ABS-NECESSARY as it will be very slow and also can hide
+	  potential bugs in code
+
+config HZ
+	int "Timer Frequency"
+	default 100
+
+config ARC_METAWARE_HLINK
+	bool "Support for Metaware debugger assisted Host access"
+	help
+	  This options allows a Linux userland apps to directly access
+	  host file system (open/creat/read/write etc) with help from
+	  Metaware Debugger. This can come in handy for Linux-host communication
+	  when there is no real usable peripheral such as EMAC.
+
+menuconfig ARC_DBG
+	bool "ARC debugging"
+	default y
+
+if ARC_DBG
+
+config ARC_DW2_UNWIND
+	bool "Enable DWARF specific kernel stack unwind"
+	default y
+	select KALLSYMS
+	help
+	  Compiles the kernel with DWARF unwind information and can be used
+	  to get stack backtraces.
+
+	  If you say Y here the resulting kernel image will be slightly larger
+	  but not slower, and it will give very useful debugging information.
+	  If you don't debug the kernel, you can say N, but we may not be able
+	  to solve problems without frame unwind information
+
+config ARC_DBG_JUMP_LABEL
+	bool "Paranoid checks in Static Keys (jump labels) code"
+	depends on JUMP_LABEL
+	default y if STATIC_KEYS_SELFTEST
+	help
+	  Enable paranoid checks and self-test of both ARC-specific and generic
+	  part of static keys (jump labels) related code.
+endif
+
+config ARC_BUILTIN_DTB_NAME
+	string "Built in DTB"
+	help
+	  Set the name of the DTB to embed in the vmlinux binary
+	  Leaving it blank selects the minimal "skeleton" dtb
+
+endmenu	 # "ARC Architecture Configuration"
+
+config ARCH_FORCE_MAX_ORDER
+	int "Maximum zone order"
+	default "12" if ARC_HUGEPAGE_16M
+	default "11"
+
+source "kernel/power/Kconfig"

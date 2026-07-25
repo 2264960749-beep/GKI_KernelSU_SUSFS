@@ -1,133 +1,56 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * linux/arch/alpha/lib/memset.S
- *
- * This is an efficient (and small) implementation of the C library "memset()"
- * function for the alpha.
- *
- *	(C) Copyright 1996 Linus Torvalds
- *
- * This routine is "moral-ware": you are free to use it any way you wish, and
- * the only obligation I put on you is a moral one: if you make any improvements
- * to the routine, please send me your improvements for me to use similarly.
- *
- * The scheduling comments are according to the EV5 documentation (and done by 
- * hand, so they might well be incorrect, please do tell me about it..)
+ * Copyright (C) 2004, 2007-2010, 2011-2012 Synopsys, Inc. (www.synopsys.com)
  */
-#include <asm/export.h>
-	.set noat
-	.set noreorder
-.text
-	.globl memset
-	.globl __memset
-	.globl ___memset
-	.globl __memset16
-	.globl __constant_c_memset
 
-	.ent ___memset
-.align 5
-___memset:
-	.frame $30,0,$26,0
-	.prologue 0
+#include <linux/linkage.h>
 
-	and $17,255,$1		/* E1 */
-	insbl $17,1,$17		/* .. E0 */
-	bis $17,$1,$17		/* E0 (p-c latency, next cycle) */
-	sll $17,16,$1		/* E1 (p-c latency, next cycle) */
+#define SMALL	7 /* Must be at least 6 to deal with alignment/loop issues.  */
 
-	bis $17,$1,$17		/* E0 (p-c latency, next cycle) */
-	sll $17,32,$1		/* E1 (p-c latency, next cycle) */
-	bis $17,$1,$17		/* E0 (p-c latency, next cycle) */
-	ldq_u $31,0($30)	/* .. E1 */
+ENTRY_CFI(memset)
+	mov_s	r4,r0
+	or	r12,r0,r2
+	bmsk.f	r12,r12,1
+	extb_s	r1,r1
+	asl	r3,r1,8
+	beq.d	.Laligned
+	or_s	r1,r1,r3
+	brls	r2,SMALL,.Ltiny
+	add	r3,r2,r0
+	stb	r1,[r3,-1]
+	bclr_s	r3,r3,0
+	stw	r1,[r3,-2]
+	bmsk.f	r12,r0,1
+	add_s	r2,r2,r12
+	sub.ne	r2,r2,4
+	stb.ab	r1,[r4,1]
+	and	r4,r4,-2
+	stw.ab	r1,[r4,2]
+	and	r4,r4,-4
+.Laligned:	; This code address should be aligned for speed.
+	asl	r3,r1,16
+	lsr.f	lp_count,r2,2
+	or_s	r1,r1,r3
+	lpne	.Loop_end
+	st.ab	r1,[r4,4]
+.Loop_end:
+	j_s	[blink]
 
-.align 5
-__constant_c_memset:
-	addq $18,$16,$6		/* E0 */
-	bis $16,$16,$0		/* .. E1 */
-	xor $16,$6,$1		/* E0 */
-	ble $18,end		/* .. E1 */
+	.balign	4
+.Ltiny:
+	mov.f	lp_count,r2
+	lpne	.Ltiny_end
+	stb.ab	r1,[r4,1]
+.Ltiny_end:
+	j_s	[blink]
+END_CFI(memset)
 
-	bic $1,7,$1		/* E0 */
-	beq $1,within_one_quad	/* .. E1 (note EV5 zero-latency forwarding) */
-	and $16,7,$3		/* E0 */
-	beq $3,aligned		/* .. E1 (note EV5 zero-latency forwarding) */
+; memzero: @r0 = mem, @r1 = size_t
+; memset:  @r0 = mem, @r1 = char, @r2 = size_t
 
-	ldq_u $4,0($16)		/* E0 */
-	bis $16,$16,$5		/* .. E1 */
-	insql $17,$16,$2	/* E0 */
-	subq $3,8,$3		/* .. E1 */
-
-	addq $18,$3,$18		/* E0	$18 is new count ($3 is negative) */
-	mskql $4,$16,$4		/* .. E1 (and possible load stall) */
-	subq $16,$3,$16		/* E0 	$16 is new aligned destination */
-	bis $2,$4,$1		/* .. E1 */
-
-	bis $31,$31,$31		/* E0 */
-	ldq_u $31,0($30)	/* .. E1 */
-	stq_u $1,0($5)		/* E0 */
-	bis $31,$31,$31		/* .. E1 */
-
-.align 4
-aligned:
-	sra $18,3,$3		/* E0 */
-	and $18,7,$18		/* .. E1 */
-	bis $16,$16,$5		/* E0 */
-	beq $3,no_quad		/* .. E1 */
-
-.align 3
-loop:
-	stq $17,0($5)		/* E0 */
-	subq $3,1,$3		/* .. E1 */
-	addq $5,8,$5		/* E0 */
-	bne $3,loop		/* .. E1 */
-
-no_quad:
-	bis $31,$31,$31		/* E0 */
-	beq $18,end		/* .. E1 */
-	ldq $7,0($5)		/* E0 */
-	mskqh $7,$6,$2		/* .. E1 (and load stall) */
-
-	insqh $17,$6,$4		/* E0 */
-	bis $2,$4,$1		/* .. E1 */
-	stq $1,0($5)		/* E0 */
-	ret $31,($26),1		/* .. E1 */
-
-.align 3
-within_one_quad:
-	ldq_u $1,0($16)		/* E0 */
-	insql $17,$16,$2	/* E1 */
-	mskql $1,$16,$4		/* E0 (after load stall) */
-	bis $2,$4,$2		/* E0 */
-
-	mskql $2,$6,$4		/* E0 */
-	mskqh $1,$6,$2		/* .. E1 */
-	bis $2,$4,$1		/* E0 */
-	stq_u $1,0($16)		/* E0 */
-
-end:
-	ret $31,($26),1		/* E1 */
-	.end ___memset
-EXPORT_SYMBOL(___memset)
-EXPORT_SYMBOL(__constant_c_memset)
-
-	.align 5
-	.ent __memset16
-__memset16:
-	.prologue 0
-
-	inswl $17,0,$1		/* E0 */
-	inswl $17,2,$2		/* E0 */
-	inswl $17,4,$3		/* E0 */
-	or $1,$2,$1		/* .. E1 */
-	inswl $17,6,$4		/* E0 */
-	or $1,$3,$1		/* .. E1 */
-	or $1,$4,$17		/* E0 */
-	br __constant_c_memset	/* .. E1 */
-
-	.end __memset16
-EXPORT_SYMBOL(__memset16)
-
-memset = ___memset
-__memset = ___memset
-	EXPORT_SYMBOL(memset)
-	EXPORT_SYMBOL(__memset)
+ENTRY_CFI(memzero)
+    ; adjust bzero args to memset args
+    mov r2, r1
+    mov r1, 0
+    b  memset    ;tail call so need to tinker with blink
+END_CFI(memzero)
