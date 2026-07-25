@@ -36,48 +36,29 @@ jobs:
   build-kernel:
     runs-on: ubuntu-latest
     steps:
-      - name: 拉取当前仓库（仅包含workflow）
+      - name: 拉取当前仓库
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: 云端自动拉取一加Ace5竞速 PLF110 官方内核源码
+      - name: 拉取一加PLF110官方内核
         run: |
           git clone -b oneplus/mt6989_v_15.0.2_ace5_race https://github.com/OnePlusOSS/android_kernel_oneplus_mt6989.git tmp_kernel
           mv tmp_kernel/* ./
           rm -rf tmp_kernel
 
-      - name: 安装编译依赖（自带gcc，无需额外clang）
+      - name: 安装编译依赖
         run: |
           sudo apt update -y
           sudo apt install -y build-essential libssl-dev libelf-dev bison flex zip unzip lld llvm python3
 
-      # 删除原来clone clang的步骤，直接使用系统gcc
-      - name: 拉取AK3 / Sukisu / SUSFS补丁
-        run: |
-          git clone https://github.com/ShirkNeko/ak3-patch scripts/patch_ak3 --depth=1
-          git clone https://github.com/SukisuKernel/Sukisu-Kernel-Patch scripts/patch_sukisu --depth=1
-          git clone https://gitlab.com/simonpunk/susfs4ksu susfs
-          cd susfs && git checkout gki-android14-6.1
-
-      - name: 应用全部内核补丁
-        run: |
-          bash scripts/patch_ak3/apply.sh $GITHUB_WORKSPACE
-          bash scripts/patch_sukisu/apply_gki.sh $GITHUB_WORKSPACE
-          cd susfs && bash apply_patches.sh $GITHUB_WORKSPACE
-
-      - name: 加载PLF110机型配置并开启功能开关
+      # 完全删除所有git clone补丁的步骤，不再访问外网补丁仓库
+      - name: 加载PLF110机型配置
         run: |
           export ARCH=arm64
           make oplus_plf110_defconfig
           scripts/config --enable BUILD_GKI_BOOTIMG
-          scripts/config --enable CONFIG_AK3_SCHEDULER
-          scripts/config --enable CONFIG_SUKISU
           scripts/config --enable CONFIG_MODULES
-          scripts/config --enable CONFIG_KSU_SUSFS
-          scripts/config --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
-          scripts/config --enable CONFIG_KSU_SUSFS_SUS_PATH
-          scripts/config --enable CONFIG_KSU_SUSFS_SUS_MOUNT
           scripts/config --enable CONFIG_OPLUS_GAME_DRIVER_EXPORT
           scripts/config --disable CONFIG_HMBIRD
           if [[ "${{ inputs.use_zram }}" == "false" ]]; then
@@ -87,25 +68,24 @@ jobs:
             scripts/config --disable CONFIG_KPM
           fi
 
-      - name: 编译完整GKI内核镜像（系统gcc编译）
+      - name: 编译内核镜像
         run: |
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           make -j$(nproc)
 
-      - name: 打包AnyKernel3刷机包（注释vendor_boot，无需上传镜像）
+      - name: 打包AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 anykernel --depth=1
           cp arch/arm64/boot/Image anykernel/Image
-          # cp ./vendor_boot.img anykernel/vendor_boot.img
           cd anykernel
-          zip -r ../GKI-AK3-SUKISU-PLF110.zip *
+          zip -r ../GKI-PLF110.zip *
           cd ..
 
-      - name: 发布刷机包到Releases
+      - name: 发布刷机包
         if: ${{ inputs.make_release == true }}
         uses: softprops/action-gh-release@v1
         with:
-          files: GKI-AK3-SUKISU-PLF110.zip
+          files: GKI-PLF110.zip
           tag_name: PLF110-A14-6.1-${{ github.sha }}
           generate_release_notes: true
