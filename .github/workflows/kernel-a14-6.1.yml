@@ -52,16 +52,17 @@ jobs:
           sudo apt update -y
           sudo apt install -y build-essential libssl-dev libelf-dev bison flex zip unzip lld llvm python3
 
+      # 替换为稳定可用的clang镜像，解决克隆失败
       - name: 下载MT6989天玑专用Clang工具链
         run: |
-          git clone https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r498229b clang
+          git clone https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r498229b clang --depth=1
           echo "CLANG_BIN=$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_ENV
-          echo "PATH=$CLANG_BIN:$GITHUB_ENV" >> $GITHUB_ENV
+          echo "PATH=$CLANG_BIN:$PATH" >> $GITHUB_ENV
 
       - name: 拉取AK3 / Sukisu / SUSFS补丁
         run: |
-          git clone https://github.com/ShirkNeko/ak3-patch scripts/patch_ak3
-          git clone https://github.com/SukisuKernel/Sukisu-Kernel-Patch scripts/patch_sukisu
+          git clone https://github.com/ShirkNeko/ak3-patch scripts/patch_ak3 --depth=1
+          git clone https://github.com/SukisuKernel/Sukisu-Kernel-Patch scripts/patch_sukisu --depth=1
           git clone https://gitlab.com/simonpunk/susfs4ksu susfs
           cd susfs && git checkout gki-android14-6.1
 
@@ -75,16 +76,23 @@ jobs:
         run: |
           export ARCH=arm64
           make oplus_plf110_defconfig
+          # 完整GKI镜像编译
           scripts/config --enable BUILD_GKI_BOOTIMG
+          # AK3调度优化
           scripts/config --enable CONFIG_AK3_SCHEDULER
+          # Sukisu内核基础
           scripts/config --enable CONFIG_SUKISU
           scripts/config --enable CONFIG_MODULES
+          # SUSFS完整隐藏模块
           scripts/config --enable CONFIG_KSU_SUSFS
           scripts/config --enable CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
           scripts/config --enable CONFIG_KSU_SUSFS_SUS_PATH
           scripts/config --enable CONFIG_KSU_SUSFS_SUS_MOUNT
+          # 允许Oplus游戏驱动导出符号，兼容风驰内核模块
           scripts/config --enable CONFIG_OPLUS_GAME_DRIVER_EXPORT
+          # 禁用小米平板冗余配置
           scripts/config --disable CONFIG_HMBIRD
+          # ZRAM、KPM开关
           if [[ "${{ inputs.use_zram }}" == "false" ]]; then
             scripts/config --disable CONFIG_ZRAM
           fi
@@ -100,14 +108,14 @@ jobs:
 
       - name: 打包AnyKernel3刷机包（注释vendor_boot，无需上传镜像）
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3 anykernel
+          git clone https://github.com/osm0sis/AnyKernel3 anykernel --depth=1
           cp arch/arm64/boot/Image anykernel/Image
           # cp ./vendor_boot.img anykernel/vendor_boot.img
           cd anykernel
           zip -r ../GKI-AK3-SUKISU-PLF110.zip *
           cd ..
 
-      - name: 发布成品到Release
+      - name: 发布刷机包到Release
         if: ${{ inputs.make_release == true }}
         uses: softprops/action-gh-release@v1
         with:
